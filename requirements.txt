@@ -1,25 +1,37 @@
-# Sahayak 1092 – Python Dependencies
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-websockets==13.1
-python-dotenv==1.0.1
-twilio==9.4.0
-openai==1.59.3
-httpx==0.28.1
-supabase==2.11.0
-pydantic==2.10.4
-python-multipart==0.0.18
-numpy==2.2.1
+# Sahayak 1092 - Python Dependencies
+
+# Backend
+fastapi>=0.115.6
+uvicorn[standard]>=0.34.0
+websockets>=13.1
+python-dotenv>=1.0.1
+python-multipart>=0.0.18
+pydantic>=2.10.4
+httpx>=0.28.1
+requests>=2.32.0
+
+# Telephony
+twilio>=9.4.0
+
+# AI providers
+openai>=1.59.3
+google-genai>=1.0.0
+deepgram-sdk>=3.9.0
+
+# Database
+supabase>=2.11.0,<2.12.0
+redis>=5.2.0
 
 # Dashboard
-streamlit==1.41.1
+streamlit>=1.41.1
 
-# Audio processing
-deepgram-sdk>=3.9.0
+# Audio processing and TTS fallbacks
 pydub==0.25.1
-
-# Gemini AI (LLM + STT)
-google-genai>=1.0.0
-
-# TTS fallback (no ffmpeg needed)
+edge-tts>=7.0.0
 gTTS>=2.5.0
+audioop-lts>=0.2.1; python_version >= "3.13"
+
+# Development and tests
+pytest>=8.3.4
+pytest-asyncio>=0.25.0
+ruff>=0.8.4

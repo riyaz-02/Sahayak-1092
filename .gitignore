@@ -27,10 +27,15 @@ wheels/
 
 # Unit test / coverage
 .pytest_cache/
+.ruff_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .tox/
 .nox/
+junit.xml
+test-results/
 
 # MyPy / type checking
 .mypy_cache/
@@ -44,6 +49,8 @@ dmypy.json
 *.log
 *.pid
 logs/
+tmp/
+temp/
 
 # ── IDEs & Editors ────────────────────────────────────────────────────────────
 .vscode/

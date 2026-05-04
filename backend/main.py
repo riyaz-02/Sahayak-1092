@@ -19,8 +19,7 @@ Endpoints:
 
 import os
 import sys
-import json
-import asyncio
+import datetime as dt
 from contextlib import asynccontextmanager
 
 # Fix Windows console encoding for Unicode
@@ -35,21 +34,31 @@ from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 from twilio.rest import Client as TwilioClient
 
+from backend.api.health import build_health_payload
+from backend.config import get_settings
 from backend.media_stream import handle_media_stream
 from backend.decision_engine import (
-    process_caller_input,
     get_or_create_call,
-    get_greeting,
-    active_calls,
+    process_caller_input,
 )
+from backend.intelligence.similarity import deterministic_seed_cases
+from backend.persistence.complaints import get_complaint_registry
+from backend.persistence.repository import get_call_repository
+from backend.routing.queue_manager import get_queue_manager
+from backend.routing.transfer_service import TransferRequest, get_transfer_service
 from backend import supabase_client as db
 
 load_dotenv()
+settings = get_settings()
+call_repository = get_call_repository()
+complaint_registry = get_complaint_registry()
+queue_manager = get_queue_manager()
+transfer_service = get_transfer_service()
 
-BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "+18666212451")
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+BASE_URL = settings.base_url
+TWILIO_PHONE_NUMBER = settings.twilio_phone_number
+TWILIO_ACCOUNT_SID = settings.twilio_account_sid
+TWILIO_AUTH_TOKEN = settings.twilio_auth_token
 
 # Twilio REST client for outbound calls
 twilio_client = None
@@ -80,15 +89,15 @@ async def lifespan(app: FastAPI):
 
 # ── App ──────────────────────────────────────
 app = FastAPI(
-    title="Sahayak 1092",
+    title=settings.app_name,
     description="AI-first voice-to-voice system for India's 1092 emergency helpline",
-    version="1.0.0",
+    version=settings.app_version,
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(settings.cors_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -112,7 +121,7 @@ async def twilio_incoming(request: Request):
         called = form.get("To", TWILIO_PHONE_NUMBER)
 
         print(f"\n{'='*60}")
-        print(f"[CALL] INCOMING CALL")
+        print("[CALL] INCOMING CALL")
         print(f"   From     : {caller}")
         print(f"   To       : {called}")
         print(f"   CallSid  : {call_sid}")
@@ -122,7 +131,7 @@ async def twilio_incoming(request: Request):
         response = VoiceResponse()
         response.pause(length=1)
 
-        ws_url = BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
+        ws_url = settings.ws_base_url
         connect = Connect()
         stream = Stream(url=f"{ws_url}/twilio/media-stream")
         stream.parameter(name="callerNumber", value=caller)
@@ -252,6 +261,8 @@ async def test_pipeline(request: Request):
     return JSONResponse({
         "response": result["response_text"],
         "action": result["action"],
+        "analysis": result.get("analysis"),
+        "similarity": result.get("similarity"),
         "call_state": {
             "call_sid": call_sid,
             "language": result["call_state"]["language"],
@@ -261,6 +272,26 @@ async def test_pipeline(request: Request):
             "sentiment": result["call_state"].get("analyses", [{}])[-1].get("sentiment", "unknown") if result["call_state"].get("analyses") else "unknown",
             "transcript_length": len(result["call_state"].get("transcript", [])),
             "outcome": result["call_state"].get("outcome"),
+            "complaint_registered": result["call_state"].get("complaint_registered"),
+            "complaint_reference_id": result["call_state"].get("complaint_reference_id"),
+            "matched_case_id": result["call_state"].get("matched_case_id"),
+            "similarity_score": result["call_state"].get("similarity_score"),
+            "similarity_source": result["call_state"].get("similarity_source"),
+            "adapted_resolution": result["call_state"].get("adapted_resolution"),
+            "similar_case": result["call_state"].get("similar_case"),
+            "agent_id": result["call_state"].get("agent_id"),
+            "handover_context": result["call_state"].get("handover_context"),
+            "routing_score_breakdown": result["call_state"].get("routing_score_breakdown"),
+            "officer_first_sentence": result["call_state"].get("officer_first_sentence"),
+            "transfer_status": result["call_state"].get("transfer_status"),
+            "transfer_mode": result["call_state"].get("transfer_mode"),
+            "queue_entry_id": result["call_state"].get("queue_entry_id"),
+            "queue_status": result["call_state"].get("queue_status"),
+            "queue_position": result["call_state"].get("queue_position"),
+            "queue_priority_score": result["call_state"].get("queue_priority_score"),
+            "queue_estimated_wait_sec": result["call_state"].get("queue_estimated_wait_sec"),
+            "queue_service_target": result["call_state"].get("queue_service_target"),
+            "high_help_alert_at": result["call_state"].get("high_help_alert_at"),
         },
     })
 
@@ -271,26 +302,16 @@ async def test_pipeline(request: Request):
 
 @app.get("/api/active-calls")
 async def api_active_calls():
-    """Get all currently active calls (in-memory)."""
-    calls = []
-    for sid, state in active_calls.items():
-        calls.append({
-            "call_sid": state.call_sid,
-            "caller_number": state.caller_number,
-            "language": state.language,
-            "phase": state.current_phase,
-            "ai_summary": state.ai_summary,
-            "transcript_count": len(state.transcript),
-            "outcome": state.outcome.value if state.outcome else None,
-        })
+    """Get all currently active calls from live repository state."""
+    calls = call_repository.fetch_active_calls()
     return JSONResponse({"active_calls": calls, "count": len(calls)})
 
 
 @app.get("/api/call-logs")
 async def api_call_logs():
-    """Get recent call logs from Supabase."""
+    """Get recent call logs from repository/Supabase."""
     try:
-        logs = db.get_recent_calls(limit=50)
+        logs = call_repository.fetch_recent_calls(limit=50)
         return JSONResponse({"call_logs": logs, "count": len(logs)})
     except Exception as e:
         return JSONResponse({"call_logs": [], "count": 0, "error": str(e)})
@@ -320,14 +341,121 @@ async def api_toggle_agent(request: Request):
     return JSONResponse({"status": "ok", "agent": result})
 
 
-@app.get("/api/complaints")
-async def api_complaints():
-    """Get recent complaints."""
+def _agent_from_context_or_db(agent_id: str, handover_context: dict) -> dict | None:
+    selected = handover_context.get("selected_agent") or {}
+    if str(selected.get("id") or "") == str(agent_id):
+        return selected
     try:
-        complaints = db.get_complaints(limit=50)
+        agent = db.get_agent_by_id(agent_id)
+        if agent:
+            return agent
+    except Exception:
+        pass
+    for ranked in handover_context.get("ranked_agents") or []:
+        if str(ranked.get("agent_id") or "") == str(agent_id):
+            return {
+                "id": ranked.get("agent_id"),
+                "name": ranked.get("name"),
+            }
+    return None
+
+
+@app.post("/api/handover/{call_sid}/accept")
+async def api_accept_handover(call_sid: str, request: Request):
+    """Officer accepts a warm handover and starts mock/Twilio transfer."""
+    body = await request.json()
+    agent_id = str(body.get("agent_id") or "").strip()
+    notes = str(body.get("notes") or "").strip()
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="'agent_id' is required")
+
+    stored_state = call_repository.get_call_state(call_sid)
+    if not stored_state:
+        raise HTTPException(status_code=404, detail="Call not found")
+    call_state = get_or_create_call(call_sid)
+    if call_state.current_phase != "handover_pending":
+        raise HTTPException(status_code=409, detail="Call is not waiting for handover acceptance")
+
+    handover_context = call_state.handover_context or {}
+    agent = _agent_from_context_or_db(agent_id, handover_context)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found for this handover")
+
+    call_state.handover_accepted_by = agent_id
+    call_state.handover_accepted_at = dt.datetime.now(dt.UTC).isoformat()
+    call_state.transfer_status = "accepted"
+    call_state.transfer_mode = settings.transfer_mode
+    call_repository.update_call_state(call_state)
+    call_repository.append_call_event(
+        call_sid=call_sid,
+        event_type="handover_accepted",
+        payload={"agent_id": agent_id, "notes": notes},
+        call_state=call_state,
+    )
+
+    transfer_result = transfer_service.accept_handover(
+        TransferRequest(
+            call_sid=call_sid,
+            agent=agent,
+            handover_context=handover_context,
+            notes=notes,
+        )
+    )
+    call_state.transfer_status = transfer_result.status
+    call_state.transfer_mode = transfer_result.mode
+    call_repository.update_call_state(call_state)
+    call_repository.append_call_event(
+        call_sid=call_sid,
+        event_type="transfer_initiated",
+        payload=transfer_result.as_dict(),
+        call_state=call_state,
+    )
+    call_repository.append_call_event(
+        call_sid=call_sid,
+        event_type="transfer_completed" if transfer_result.success else "transfer_failed",
+        payload=transfer_result.as_dict(),
+        call_state=call_state,
+    )
+    if transfer_result.success:
+        try:
+            db.increment_agent_load(agent_id)
+        except Exception:
+            pass
+
+    return JSONResponse(
+        {
+            "status": "ok" if transfer_result.success else "failed",
+            "call_sid": call_sid,
+            "agent": agent,
+            "handover_context": handover_context,
+            "transfer": transfer_result.as_dict(),
+        }
+    )
+
+
+@app.get("/api/complaints")
+async def api_complaints(call_sid: str | None = None):
+    """Get recent structured complaints/actions through the registry facade."""
+    try:
+        complaints = complaint_registry.list_complaints(limit=50, call_sid=call_sid)
         return JSONResponse({"complaints": complaints, "count": len(complaints)})
     except Exception as e:
         return JSONResponse({"complaints": [], "count": 0, "error": str(e)})
+
+
+@app.get("/api/complaints/{reference_id}/timeline")
+async def api_complaint_timeline(reference_id: str):
+    """Get complaint timeline events for a citizen-facing reference ID."""
+    complaint = complaint_registry.get_by_reference(reference_id)
+    timeline = complaint_registry.get_timeline(reference_id=reference_id, limit=100)
+    return JSONResponse(
+        {
+            "reference_id": reference_id,
+            "complaint": complaint,
+            "timeline": timeline,
+            "count": len(timeline),
+        }
+    )
 
 
 @app.get("/api/resolved-cases")
@@ -335,9 +463,57 @@ async def api_resolved_cases():
     """Get the knowledge base of resolved cases."""
     try:
         cases = db.get_all_resolved_cases(limit=100)
+        if not cases and settings.demo_mode:
+            cases = [
+                {key: value for key, value in case.items() if key != "embedding"}
+                for case in deterministic_seed_cases()
+            ]
         return JSONResponse({"cases": cases, "count": len(cases)})
     except Exception as e:
+        if settings.demo_mode:
+            cases = [
+                {key: value for key, value in case.items() if key != "embedding"}
+                for case in deterministic_seed_cases()
+            ]
+            return JSONResponse({"cases": cases, "count": len(cases), "fallback": "demo_seed"})
         return JSONResponse({"cases": [], "count": 0, "error": str(e)})
+
+
+@app.get("/api/call-transcript/{call_sid}")
+async def api_call_transcript(call_sid: str):
+    """Get the transcript for a call from live state or durable logs."""
+    transcript = call_repository.fetch_call_transcript(call_sid)
+    return JSONResponse({"call_sid": call_sid, "transcript": transcript, "count": len(transcript)})
+
+
+@app.get("/api/call-events")
+async def api_call_events(call_sid: str | None = None, limit: int = 100):
+    """Get audit events for one call or recent events across calls."""
+    events = call_repository.fetch_call_events(call_sid=call_sid, limit=limit)
+    return JSONResponse({"events": events, "count": len(events)})
+
+
+@app.get("/api/queue")
+async def api_queue(include_inactive: bool = False, limit: int = 50):
+    """Get current priority queue entries."""
+    entries = queue_manager.list_entries(include_inactive=include_inactive, limit=limit)
+    return JSONResponse(
+        {
+            "queue": entries,
+            "count": len(entries),
+            "high_help_alert_timeout_sec": queue_manager.queue_timeout_sec(),
+            "demo_mode": settings.demo_mode,
+        }
+    )
+
+
+@app.get("/api/queue/{call_sid}")
+async def api_queue_entry(call_sid: str):
+    """Get one priority queue entry by call SID."""
+    entry = queue_manager.get_entry(call_sid)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Queue entry not found")
+    return JSONResponse({"queue_entry": entry.as_dict()})
 
 
 # ──────────────────────────────────────────────
@@ -347,29 +523,35 @@ async def api_resolved_cases():
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return JSONResponse({
-        "status": "healthy",
-        "service": "Sahayak 1092",
-        "version": "1.0.0",
-        "active_calls": len(active_calls),
-    })
+    return JSONResponse(
+        build_health_payload(
+            active_calls=len(call_repository.fetch_active_calls()),
+            persistence=call_repository.health_check(),
+        )
+    )
 
 
 @app.get("/")
 async def root():
     """Root endpoint with service info."""
     return JSONResponse({
-        "service": "Sahayak 1092",
+        "service": settings.app_name,
         "tagline": "Every Voice Heard. Every Call Resolved. Every Second Counts.",
-        "version": "1.0.0",
+        "version": settings.app_version,
         "endpoints": {
             "incoming_call": "POST /twilio/incoming",
             "media_stream": "WS /twilio/media-stream",
             "test_pipeline": "POST /api/test-pipeline",
             "active_calls": "GET /api/active-calls",
             "call_logs": "GET /api/call-logs",
+            "call_transcript": "GET /api/call-transcript/{call_sid}",
+            "call_events": "GET /api/call-events?call_sid=...",
+            "queue": "GET /api/queue",
+            "queue_entry": "GET /api/queue/{call_sid}",
             "agents": "GET /api/agents",
+            "accept_handover": "POST /api/handover/{call_sid}/accept",
             "complaints": "GET /api/complaints",
+            "complaint_timeline": "GET /api/complaints/{reference_id}/timeline",
             "resolved_cases": "GET /api/resolved-cases",
             "health": "GET /health",
         },
@@ -382,6 +564,4 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("backend.main:app", host=host, port=port, reload=True)
+    uvicorn.run("backend.main:app", host=settings.host, port=settings.port, reload=settings.debug)

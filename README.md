@@ -1,560 +1,641 @@
-<p align="center">
-  <h1 align="center">🚨 Sahayak 1092</h1>
-  <p align="center"><strong>Every Voice Heard. Every Call Resolved. Every Second Counts.</strong></p>
-  <p align="center">AI-first voice-to-voice system for India's 1092 Emergency Helpline</p>
-  <p align="center">
-    <em>AI for Bharat 2026 · Theme 12: AI for 1092 Helpline</em>
-  </p>
-</p>
+# Sahayak 1092
 
----
+**Every Voice Heard. Every Call Resolved. Every Second Counts.**
 
-## 🎯 What is Sahayak 1092?
+Sahayak 1092 is an AI-first voice-to-voice helpline system for India's 1092 emergency support flow. It answers a citizen immediately, understands their language, dialect, intent, emotion, and urgency, resolves high-confidence calls autonomously, and hands over only true exceptions to the best available officer with full context.
 
-When someone dials **1092**, they want fast, accurate help — not long waits or repeated explanations to an officer who may not fully understand their dialect or emotion.
+The goal is simple: reduce caller wait time, reduce repeated explanations, protect frontline officers from routine overload, and keep the human team focused on cases where human judgement matters most.
 
-**Sahayak 1092** is an AI-first voice-to-voice system that takes full control from the first ring and resolves most calls end-to-end automatically. Only in genuine exception cases does it hand over seamlessly to the nearest available officer.
+## Table of Contents
 
-### Key Innovations
+- [Problem](#problem)
+- [Solution](#solution)
+- [Key Capabilities](#key-capabilities)
+- [Architecture](#architecture)
+- [Repository Structure](#repository-structure)
+- [Setup](#setup)
+- [Environment Variables](#environment-variables)
+- [Supabase and Vector DB](#supabase-and-vector-db)
+- [Run Locally](#run-locally)
+- [Testing](#testing)
+- [API Reference](#api-reference)
+- [Demo Guide](#demo-guide)
+- [Production Notes](#production-notes)
 
-| Feature | Description |
-|---------|-------------|
-| 🗣️ **Multilingual Voice AI** | Answers instantly in Kannada, Hindi, or English — detects language and dialect automatically |
-| 🧠 **Smart Similarity Detection** | Matches against previous human-resolved cases. If similar, resolves automatically without handover |
-| ✅ **Vachan (Confirmation Loop)** | Always restates understanding and asks for yes/no confirmation before final action |
-| 📊 **Urgency-First Routing** | 50% urgency + 40% language/dialect fit + 10% shortest wait — when handover is needed |
-| 🚨 **High-Help Alert** | 2-minute queue timeout auto-transfers to police as critical alert |
-| 📱 **Surge IVR** | Press 1 for Police, 2 for Ambulance, 3 for Fire — instant redirect while in queue |
+## Problem
 
----
+When someone dials 1092, they usually need fast, accurate help. In the current human-first support pattern, even routine calls often go straight to an officer. That creates three serious problems:
 
-## 📞 Complete Call Flow
+- Citizens wait during urgent moments.
+- Callers may need to repeat details because of language, dialect, or emotional mismatch.
+- Officers spend time on repetitive cases instead of complex or high-distress cases.
 
-```
-Caller dials 1092 (Twilio)
-        │
-        ▼
-┌───────────────────────────────────┐
-│  Sahayak answers instantly        │
-│  Greets in Kannada/Hindi/English  │
-└──────────────┬────────────────────┘
-               │
-               ▼
-┌───────────────────────────────────┐
-│  Citizen speaks freely            │
-│  Real-time STT via Bhashini/      │
-│  Deepgram/Whisper                 │
-└──────────────┬────────────────────┘
-               │
-               ▼
-┌───────────────────────────────────┐
-│  AI Decision Engine analyses:     │
-│  • Language & dialect             │
-│  • Sentiment & urgency            │
-│  • Confidence score               │
-│  • Category classification        │
-└──────────────┬────────────────────┘
-               │
-        ┌──────┴──────┐
-        ▼             ▼
-   HIGH CONF.     HANDOVER NEEDED
-   (≥ 0.7)       (3 conditions)
-        │             │
-        ▼             ▼
-┌──────────────┐ ┌──────────────────┐
-│ Similarity   │ │ Conditions:      │
-│ Detection    │ │ • Low conf (×2)  │
-│ against KB   │ │ • Caller asks    │
-│              │ │ • Extreme urgency│
-│ If match ≥70%│ └────────┬─────────┘
-│ → Auto-solve │          │
-└──────┬───────┘    ┌─────┴─────┐
-       │            ▼           ▼
-       ▼       AGENT FOUND   NO AGENT
-┌──────────────┐    │           │
-│ VACHAN LOOP  │    ▼           ▼
-│ "Is this     │  Warm       Queue +
-│  correct?    │  Transfer   IVR Surge
-│  Yes / No"   │  + Summary  Handling
-└──────┬───────┘  + Transcript
-       │
-  YES  │  NO
-   │   │   │
-   ▼   │   ▼
-RESOLVE│  RE-LISTEN
-+ FIR  │
-+ KB   │
-```
+Sahayak 1092 changes the default from human-first to AI-first, while still keeping human handover ready for genuine exceptions.
 
----
+## Solution
 
-## 🏗️ Architecture
+Sahayak takes control from the first second of the call.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        TWILIO CLOUD                              │
-│   Caller ──► Toll-Free Number ──► Webhook ──► Media Stream WS   │
-└─────────────────────────────────┬───────────────────────────────┘
-                                  │
-                    ┌─────────────▼─────────────┐
-                    │    FastAPI Backend         │
-                    │                            │
-                    │  ┌──────────────────────┐  │
-                    │  │  Media Stream Handler │  │  Twilio mulaw ↔ PCM
-                    │  │  (WebSocket)          │  │
-                    │  └──────────┬───────────┘  │
-                    │             │               │
-                    │  ┌──────────▼───────────┐  │
-                    │  │  STT Pipeline         │  │  Bhashini → Deepgram → Whisper
-                    │  └──────────┬───────────┘  │
-                    │             │               │
-                    │  ┌──────────▼───────────┐  │
-                    │  │  Decision Engine      │  │  GPT-4o / Grok
-                    │  │  • Analyse            │  │  Language, Sentiment, Urgency
-                    │  │  • Similarity Match   │  │  KB Matching
-                    │  │  • Route / Resolve    │  │  Agent Scoring
-                    │  │  • Vachan Loop        │  │  Confirmation
-                    │  └──────────┬───────────┘  │
-                    │             │               │
-                    │  ┌──────────▼───────────┐  │
-                    │  │  TTS Pipeline         │  │  Bhashini → OpenAI TTS
-                    │  └──────────┬───────────┘  │
-                    │             │               │
-                    │  ┌──────────▼───────────┐  │
-                    │  │  Supabase Client      │  │  Cases, Agents, Logs, Complaints
-                    │  └──────────────────────┘  │
-                    └────────────────────────────┘
-                                  │
-                    ┌─────────────▼─────────────┐
-                    │  Streamlit Dashboard       │
-                    │  Live Calls · Agents ·     │
-                    │  History · KB · Complaints  │
-                    └────────────────────────────┘
+1. Citizen calls 1092.
+2. Sahayak answers instantly in the detected language.
+3. The caller speaks naturally.
+4. Sahayak analyzes language, dialect, sentiment, urgency, intent, and confidence.
+5. For high-confidence routine issues, Sahayak resolves the call end-to-end.
+6. Before final action, Sahayak runs the Vachan confirmation loop so the citizen confirms the understanding.
+7. If the case needs a human, Sahayak routes to the best available officer by urgency, language/dialect fit, and wait time.
+8. During surge conditions, Sahayak places the caller in a priority queue, offers DTMF emergency redirects, and triggers a High-Help Alert if the caller becomes unresponsive.
+
+## Key Capabilities
+
+| Capability | What it does |
+|---|---|
+| AI-first call ownership | Resolves most high-confidence calls without default human transfer. |
+| Multilingual analysis | Supports deterministic local analysis and provider-backed LLM analysis. |
+| Smart Similarity Detection | Matches new issues against previously resolved cases using local embeddings or Supabase pgvector. |
+| Vachan confirmation | Restates Sahayak's understanding and asks for yes/no/partial confirmation before final action. |
+| Complaint registry | Creates structured complaint/action records with readable reference IDs. |
+| Warm officer handover | Sends transcript, AI summary, sentiment, urgency, routing score, and first-sentence guidance to the officer. |
+| Urgency-first routing | Scores officers using urgency/specialty, language/dialect fit, and wait/load signals. |
+| Surge queue | Handles no-agent scenarios with priority queue position and estimated wait. |
+| DTMF redirect | Supports "1 Police, 2 Ambulance, 3 Fire" while waiting in queue. |
+| High-Help Alert | Auto-flags queued callers after timeout and routes toward police assistance. |
+| Audit trail | Stores call events for analysis, similarity, Vachan, complaint, handover, queue, voice, and latency milestones. |
+| Local demo mode | Runs without paid provider keys using deterministic fallbacks and local in-memory storage. |
+
+## Architecture
+
+### System Architecture
+
+This is the main production shape of Sahayak 1092. Telephony, AI processing, routing, persistence, dashboard, and human handover are separated so the system can be tested locally and scaled in production.
+
+```mermaid
+flowchart LR
+    Citizen["Citizen Phone Call"] --> Telephony["Telephony Bridge<br/>Twilio / Exotel / SIP"]
+    Telephony --> Media["Media Stream WebSocket<br/>backend.media_stream"]
+
+    Media --> STT["STT Provider Cascade<br/>Bhashini / Deepgram / Google / Whisper"]
+    STT --> Engine["Decision Engine<br/>backend.decision_engine"]
+
+    Engine --> Analyzer["Language, Dialect, Sentiment,<br/>Urgency, Intent, Confidence"]
+    Engine --> Similarity["Smart Similarity<br/>Resolved Case Retrieval"]
+    Engine --> Vachan["Vachan Confirmation Loop"]
+    Engine --> Registry["Complaint / Action Registry"]
+    Engine --> Routing["Officer Router"]
+    Engine --> Queue["Priority Queue<br/>Surge IVR + High-Help Alert"]
+
+    Similarity --> VectorDB["Supabase pgvector<br/>resolved_cases.embedding"]
+    Registry --> Supabase["Supabase Postgres<br/>logs, events, complaints"]
+    Queue --> Supabase
+    Routing --> Agents["Officer Availability<br/>agents table"]
+
+    Routing --> Transfer["Warm Transfer Service<br/>Mock or Twilio"]
+    Queue --> Transfer
+    Transfer --> Officer["Human Officer Dashboard"]
+
+    Engine --> TTS["TTS Provider Cascade<br/>Bhashini / Google / Edge / OpenAI"]
+    TTS --> Media
+    Media --> Citizen
+
+    Dashboard["Streamlit Command Center"] --> API["FastAPI REST API"]
+    API --> Supabase
+    API --> Engine
 ```
 
----
+### AI Decision Architecture
 
-## 🛠️ Tech Stack
+The decision engine uses deterministic safety rules before autonomous action. It does not blindly let an LLM decide emergency handover.
 
-| Component | Technology |
-|-----------|-----------|
-| **Backend** | FastAPI + Python 3.11+ |
-| **Telephony** | Twilio Voice + Media Streams WebSocket |
-| **STT (Primary)** | Bhashini / VoicERA (Indian languages) |
-| **STT (Fallback)** | Deepgram Nova-2, OpenAI Whisper |
-| **TTS (Primary)** | Bhashini (natural Indian voice) |
-| **TTS (Fallback)** | OpenAI TTS (nova voice) |
-| **NLU / LLM** | OpenAI GPT-4o or Grok (via compatible API) |
-| **Database** | Supabase (PostgreSQL) |
-| **Dashboard** | Streamlit |
-| **Tunnel** | ngrok (for local development) |
+```mermaid
+flowchart TD
+    Input["Caller utterance"] --> Analyze["Structured analysis"]
+    Analyze --> Safety{"Exception condition?"}
 
----
+    Safety -->|Low confidence after retries| Handover["Human handover path"]
+    Safety -->|Caller asks for officer| Handover
+    Safety -->|Extreme urgency or distress| Handover
 
-## 📁 Project Structure
+    Safety -->|No exception| Similar["Smart Similarity lookup"]
+    Similar --> Vachan["Restate understanding<br/>yes / no / partial"]
 
-```
-sahayak-1092/
-├── backend/
-│   ├── __init__.py
-│   ├── main.py                 # FastAPI app — Twilio webhooks, REST APIs, WebSocket
-│   ├── media_stream.py         # Real-time audio: Twilio ↔ STT ↔ LLM ↔ TTS
-│   ├── decision_engine.py      # Language/sentiment/urgency + Vachan + Similarity + Routing
-│   └── supabase_client.py      # DB schema, CRUD, seed data
-├── dashboard/
-│   ├── __init__.py
-│   └── app.py                  # Streamlit command center dashboard
-├── .env.example                # Environment variable template
-├── requirements.txt            # Python dependencies
-└── README.md                   # This file
+    Vachan -->|Yes| Action["Register complaint or action"]
+    Vachan -->|No| Clarify["Ask clarifying question"]
+    Vachan -->|Partial| Correct["Update summary and reconfirm"]
+
+    Handover --> Agent{"Officer available?"}
+    Agent -->|Yes| Warm["Warm transfer with context"]
+    Agent -->|No| Queue["Priority queue"]
+
+    Queue --> DTMF{"Caller DTMF?"}
+    DTMF -->|1| Police["Police redirect"]
+    DTMF -->|2| Ambulance["Ambulance redirect"]
+    DTMF -->|3| Fire["Fire redirect"]
+    DTMF -->|No response after timeout| Alert["High-Help Alert"]
 ```
 
----
+### Data Architecture
 
-## 🚀 Quick Start
+Supabase is the durable system of record. Local development can run without it, but production persistence and vector search need it.
+
+```mermaid
+erDiagram
+    agents ||--o{ call_logs : "handles"
+    resolved_cases ||--o{ call_logs : "matched_by"
+    call_logs ||--o{ call_events : "records"
+    call_logs ||--o{ complaints : "creates"
+    complaints ||--o{ complaint_timeline : "tracks"
+    call_logs ||--o{ call_queue : "queued_as"
+
+    agents {
+        string id
+        string name
+        string badge_id
+        string phone
+        string languages
+        string specialties
+        boolean is_available
+        int current_load
+        int avg_wait_sec
+    }
+
+    resolved_cases {
+        string id
+        string summary
+        string category
+        string language
+        string dialect
+        vector embedding
+        string resolution
+        string tags
+    }
+
+    call_logs {
+        string id
+        string call_sid
+        string caller_number
+        json transcript
+        string ai_summary
+        string outcome
+        float urgency
+        float confidence
+    }
+
+    call_events {
+        string id
+        string call_sid
+        string event_type
+        json payload
+        string phase
+    }
+
+    complaints {
+        string id
+        string reference_id
+        string call_sid
+        string category
+        string status
+        json government_payload
+    }
+
+    call_queue {
+        string id
+        string call_sid
+        string status
+        float priority_score
+        int position
+        int estimated_wait_sec
+        string service_target
+    }
+```
+
+### Runtime Modes
+
+| Mode | Purpose | Storage | AI/Voice |
+|---|---|---|---|
+| Local demo | Fast development and judging walkthrough | In-memory fallback | Deterministic analyzer, local embedding fallback, TTS fallback |
+| Integrated demo | Real dashboard plus durable records | Supabase and optional Redis | Configurable provider cascade |
+| Phone demo | Real Twilio call | Supabase recommended | Twilio Media Stream plus STT/TTS providers |
+| Production target | Government-ready deployment shape | Supabase/Postgres, Redis, observability | Bhashini-first voice, audited AI decisions, warm transfer |
+
+## Repository Structure
+
+```text
+.
+|-- backend/
+|   |-- app.py                       # ASGI entrypoint for deployment
+|   |-- main.py                      # FastAPI app, Twilio webhooks, REST API
+|   |-- config.py                    # Typed environment settings
+|   |-- decision_engine.py           # Main AI-first decision pipeline
+|   |-- media_stream.py              # Twilio WebSocket voice loop
+|   |-- vector_admin.py              # Seed/backfill vector cases
+|   |-- intelligence/
+|   |   |-- analyzer.py              # Deterministic and LLM analyzers
+|   |   |-- embeddings.py            # Deterministic/OpenAI embedding providers
+|   |   |-- safety_rules.py          # Handover policy
+|   |   |-- schemas.py               # Shared domain models
+|   |   `-- similarity.py            # Smart Similarity retrieval
+|   |-- persistence/
+|   |   |-- complaints.py            # Complaint/action registry
+|   |   |-- models.sql               # Supabase schema
+|   |   |-- pii.py                   # PII helpers
+|   |   `-- repository.py            # Call state, events, logs
+|   |-- routing/
+|   |   |-- officer_router.py        # Urgency/language/wait scoring
+|   |   |-- queue_manager.py         # Priority queue and High-Help Alert
+|   |   `-- transfer_service.py      # Mock/Twilio warm transfer
+|   `-- voice/
+|       |-- audio_codec.py           # mu-law/PCM helpers
+|       |-- stt.py                   # STT provider cascade
+|       |-- tts.py                   # TTS provider cascade and phrase cache
+|       `-- vad.py                   # Voice activity detection
+|-- dashboard/
+|   `-- app.py                       # Streamlit command center
+|-- tests/                           # Regression tests
+|-- Makefile                         # Common developer commands
+|-- ROADMAP.md                       # Phase-wise build plan
+|-- IMPLEMENTATION_PLAN.txt          # Original project idea and plan
+|-- requirements.txt
+`-- .env.example
+```
+
+## Setup
 
 ### Prerequisites
 
-- **Python 3.11+**
-- **ngrok** account (free) — [ngrok.com](https://ngrok.com)
-- **Twilio** account with toll-free number
-- **Supabase** project (free tier works)
-- **OpenAI** API key (or Grok-compatible key)
-- Optionally: **Bhashini** API key, **Deepgram** API key
+- Python 3.11 or newer
+- A terminal with `make`
+- Optional: Supabase project for durable DB and vector search
+- Optional: Twilio account and ngrok for real phone calls
+- Optional: provider keys for Bhashini, Deepgram, Gemini, OpenAI
 
-### Step 1: Clone & Install
+### Install Dependencies
 
 ```bash
-git clone https://github.com/your-repo/sahayak-1092.git
-cd sahayak-1092
-
-# Create virtual environment
-python -m venv venv
-
-# Activate (Windows)
-venv\Scripts\activate
-
-# Activate (Mac/Linux)
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+.venv/bin/python -m pip install --prefer-binary -r requirements.txt
 ```
 
-### Step 2: Configure Environment
+On Windows:
 
 ```bash
-# Copy the template
+python -m venv .venv
+.venv\Scripts\activate
+.venv\Scripts\python -m pip install --prefer-binary -r requirements.txt
+```
+
+### Create `.env`
+
+```bash
 cp .env.example .env
-
-# Edit .env with your actual keys
-notepad .env   # Windows
-# nano .env    # Linux/Mac
 ```
 
-**Required keys:**
-| Key | Where to get it |
-|-----|----------------|
-| `TWILIO_ACCOUNT_SID` | [Twilio Console](https://console.twilio.com/) |
-| `TWILIO_AUTH_TOKEN` | Twilio Console |
-| `TWILIO_PHONE_NUMBER` | Your Twilio toll-free number |
-| `OPENAI_API_KEY` | [OpenAI Platform](https://platform.openai.com/) |
-| `SUPABASE_URL` | [Supabase Dashboard](https://supabase.com/dashboard) → Settings → API |
-| `SUPABASE_KEY` | Supabase Dashboard → Settings → API (anon public key) |
-| `BASE_URL` | Your ngrok HTTPS URL (set after Step 4) |
+For local development, blank provider keys are allowed. Sahayak will use deterministic and local fallbacks where possible.
 
-**Optional keys (for enhanced Indian language support):**
-| Key | Where to get it |
-|-----|----------------|
-| `BHASHINI_API_KEY` | [Bhashini Platform](https://bhashini.gov.in/) |
-| `DEEPGRAM_API_KEY` | [Deepgram Console](https://console.deepgram.com/) |
+## Environment Variables
 
-### Step 3: Setup Supabase Database
+### Minimum Local Demo
 
-1. Go to your Supabase project → **SQL Editor**
-2. Copy the SQL from `backend/supabase_client.py` (the `BOOTSTRAP_SQL` constant)
-3. Run it in the SQL editor to create all tables
-4. The app will auto-seed demo agents and resolved cases on first start
+```env
+SAHAYAK_ENV=development
+DEBUG=true
+DEMO_MODE=true
+BASE_URL=http://localhost:8000
+SAHAYAK_API_URL=http://localhost:8000
 
-**Tables created:**
-- `resolved_cases` — Knowledge base for similarity matching
-- `agents` — Human officers with language skills
-- `call_logs` — Per-call transcript, analysis, outcome
-- `complaints` — Registered complaints linked to calls
+ANALYSIS_PROVIDER=deterministic
+EMBEDDING_PROVIDER=deterministic
+TRANSFER_MODE=mock
+```
 
-### Step 4: Start ngrok Tunnel
+### AI and Voice Providers
+
+| Variable | Used for |
+|---|---|
+| `OPENAI_API_KEY` | LLM analysis, response generation, embeddings, Whisper/TTS fallback |
+| `OPENAI_BASE_URL` | OpenAI-compatible provider endpoint |
+| `LLM_MODEL` | Main LLM model name |
+| `BHASHINI_API_KEY` | Indian-language STT/TTS provider |
+| `BHASHINI_USER_ID` | Bhashini user identifier |
+| `DEEPGRAM_API_KEY` | STT fallback |
+| `GEMINI_API_KEY` | Google/Gemini fallback path |
+| `STT_PROVIDER_ORDER` | Ordered STT provider cascade |
+| `TTS_PROVIDER_ORDER` | Ordered TTS provider cascade |
+| `VOICE_PROVIDER_TIMEOUT_SEC` | Per-provider voice timeout |
+| `TTS_PHRASE_CACHE_ENABLED` | Cache common spoken phrases after first synthesis |
+
+### Telephony
+
+| Variable | Used for |
+|---|---|
+| `TWILIO_ACCOUNT_SID` | Twilio REST client |
+| `TWILIO_AUTH_TOKEN` | Twilio REST client |
+| `TWILIO_PHONE_NUMBER` | Incoming/outbound Twilio number |
+| `BASE_URL` | Public backend URL used by Twilio webhooks |
+| `TRANSFER_MODE` | `mock` for local demo, `twilio` for real transfer mode |
+
+### Persistence and Similarity
+
+| Variable | Used for |
+|---|---|
+| `SUPABASE_URL` | Supabase project URL |
+| `SUPABASE_KEY` | Supabase API key |
+| `REDIS_URL` | Optional live call state store |
+| `EMBEDDING_PROVIDER` | `deterministic`, `openai`, or `auto` |
+| `EMBEDDING_MODEL` | Embedding model name |
+| `EMBEDDING_DIMENSION` | Vector dimension, default `1536` |
+| `VECTOR_SEARCH_LIMIT` | Candidate count for vector search |
+| `VECTOR_DB_MATCH_THRESHOLD` | DB-side cosine similarity threshold |
+| `SIMILARITY_MATCH_THRESHOLD` | Final blended similarity threshold |
+
+### Decision and Queue Settings
+
+| Variable | Default | Used for |
+|---|---:|---|
+| `LOW_CONFIDENCE_THRESHOLD` | `0.5` | Retry/handover threshold |
+| `LOW_CONFIDENCE_MAX_ATTEMPTS` | `2` | Max low-confidence attempts before human handover |
+| `AUTONOMOUS_CONFIDENCE_THRESHOLD` | `0.7` | Minimum confidence for autonomous progress |
+| `EXTREME_URGENCY_THRESHOLD` | `0.9` | Urgency threshold for immediate human path |
+| `HIGH_HELP_ALERT_TIMEOUT_SEC` | `120` | Production queue timeout |
+| `HIGH_HELP_ALERT_DEMO_TIMEOUT_SEC` | `20` | Short demo-mode queue timeout |
+
+## Supabase and Vector DB
+
+Supabase is used for durable persistence. The vector DB is Supabase Postgres with the `pgvector` extension.
+
+### What Supabase Stores
+
+| Table | Purpose |
+|---|---|
+| `agents` | Officer profile, languages, specialties, availability, wait/load |
+| `resolved_cases` | Knowledge base of handled cases and their embeddings |
+| `call_logs` | Call-level record, transcript, summary, outcome, handover/queue fields |
+| `call_events` | Immutable audit events for every major decision |
+| `complaints` | Structured citizen complaint/action records |
+| `complaint_timeline` | Timeline of complaint and government-payload events |
+| `call_queue` | Durable surge queue entries, priority score, status, High-Help Alert data |
+
+### How Vector Search Works
+
+```mermaid
+flowchart LR
+    NewIssue["New caller issue"] --> Embed["Generate issue embedding"]
+    Embed --> Match["Supabase RPC<br/>match_resolved_cases"]
+    Match --> Cases["resolved_cases.embedding"]
+    Cases --> Rank["Blend vector score<br/>with category/language/urgency signals"]
+    Rank --> Decision{"High-quality match?"}
+    Decision -->|Yes| Reuse["Adapt prior resolution"]
+    Decision -->|No| Fresh["Generate new resolution"]
+```
+
+The vector DB is used inside Smart Similarity Detection:
+
+- `backend/intelligence/embeddings.py` generates embeddings.
+- `backend/intelligence/similarity.py` queries similar resolved cases.
+- `backend/persistence/models.sql` defines `resolved_cases.embedding` and `match_resolved_cases(...)`.
+- `backend/vector_admin.py` seeds and backfills vector data.
+
+Local development can use deterministic embeddings. Production should use provider embeddings with stable dimensions.
+
+### Create Supabase Schema
+
+1. Create a Supabase project.
+2. Open the Supabase SQL Editor.
+3. Run all SQL from:
+
+```text
+backend/persistence/models.sql
+```
+
+4. Add credentials to `.env`:
+
+```env
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your_supabase_key
+```
+
+5. For production vector search, configure embeddings:
+
+```env
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=your_key
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSION=1536
+```
+
+6. Seed and backfill demo cases:
 
 ```bash
-# In a separate terminal
+make PYTHON=.venv/bin/python seed-vector-cases
+make PYTHON=.venv/bin/python backfill-vector-embeddings
+```
+
+## Run Locally
+
+### Backend
+
+```bash
+make PYTHON=.venv/bin/python dev-backend
+```
+
+Backend URLs:
+
+```text
+API:    http://localhost:8000
+Health: http://localhost:8000/health
+Docs:   http://localhost:8000/docs
+```
+
+### Dashboard
+
+```bash
+make PYTHON=.venv/bin/python dev-dashboard
+```
+
+Dashboard URL:
+
+```text
+http://localhost:8501
+```
+
+## Testing
+
+Run the full verification suite:
+
+```bash
+make PYTHON=.venv/bin/python smoke
+.venv/bin/python -m ruff check backend dashboard tests
+```
+
+Or run directly:
+
+```bash
+.venv/bin/python -m compileall backend dashboard tests
+.venv/bin/python -m pytest -q
+```
+
+Current verified result:
+
+```text
+42 passed
+```
+
+### Text-Only Pipeline Test
+
+Use this before trying a real phone call:
+
+```bash
+curl -X POST http://localhost:8000/api/test-pipeline \
+  -H "Content-Type: application/json" \
+  -d '{"call_sid":"demo-mobile-1","text":"My mobile phone was stolen at Majestic bus stand","language":"english"}'
+```
+
+Then confirm Vachan using the same `call_sid`:
+
+```bash
+curl -X POST http://localhost:8000/api/test-pipeline \
+  -H "Content-Type: application/json" \
+  -d '{"call_sid":"demo-mobile-1","text":"yes","language":"english"}'
+```
+
+Check created complaints:
+
+```bash
+curl http://localhost:8000/api/complaints
+```
+
+Check audit events:
+
+```bash
+curl "http://localhost:8000/api/call-events?call_sid=demo-mobile-1&limit=50"
+```
+
+### Queue and Surge Test
+
+To show the no-agent surge behavior:
+
+1. Set all dashboard agents unavailable, or use an empty `agents` table.
+2. Trigger a human-request or high-urgency call through `/api/test-pipeline`.
+3. Check queue state:
+
+```bash
+curl http://localhost:8000/api/queue
+```
+
+4. Open the dashboard Queue page to see position, wait, priority, and High-Help Alert status.
+
+## Live Phone Call
+
+Manual telephony setup is required.
+
+1. Start backend:
+
+```bash
+make PYTHON=.venv/bin/python dev-backend
+```
+
+2. Start a public tunnel:
+
+```bash
 ngrok http 8000
 ```
 
-Copy the **HTTPS** forwarding URL (e.g., `https://abc123.ngrok-free.app`) and:
-1. Set `BASE_URL` in your `.env` file
-2. Configure it as the Twilio webhook (Step 5)
-
-### Step 5: Configure Twilio Webhook
-
-1. Go to [Twilio Console](https://console.twilio.com/) → Phone Numbers → Your number
-2. Under **Voice & Fax → A CALL COMES IN**:
-   - Set to **Webhook**
-   - URL: `https://your-ngrok-url.ngrok-free.app/twilio/incoming`
-   - Method: **POST**
-3. Under **Status Callback URL** (optional):
-   - URL: `https://your-ngrok-url.ngrok-free.app/twilio/status`
-   - Method: **POST**
-4. Save
-
-### Step 6: Start the Backend
-
-```bash
-# From project root
-python -m backend.main
-```
-
-Or:
-
-```bash
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-You should see:
-```
-============================================================
-🚀 Sahayak 1092 – Starting up...
-   Base URL : https://your-ngrok-url.ngrok-free.app
-   Twilio # : +18666212451
-============================================================
-✅ Seeded demo agents
-✅ Seeded demo resolved cases
-```
-
-### Step 7: Start the Dashboard
-
-```bash
-# In a separate terminal
-streamlit run dashboard/app.py
-```
-
-Dashboard opens at `http://localhost:8501`
-
----
-
-## 🧪 Testing Guide
-
-### Test 1: Health Check
-
-```bash
-curl http://localhost:8000/health
-```
-
-Expected:
-```json
-{"status": "healthy", "service": "Sahayak 1092", "version": "1.0.0", "active_calls": 0}
-```
-
-### Test 2: AI Pipeline (No Phone Needed)
-
-Use the `/api/test-pipeline` endpoint to test the full AI decision pipeline:
-
-```bash
-# English - Theft report
-curl -X POST http://localhost:8000/api/test-pipeline \
-  -H "Content-Type: application/json" \
-  -d '{"text": "My phone was stolen at the bus stand", "language": "english"}'
-
-# Kannada - Domestic violence (high urgency)
-curl -X POST http://localhost:8000/api/test-pipeline \
-  -H "Content-Type: application/json" \
-  -d '{"text": "ನನ್ನ ಗಂಡ ನನ್ನನ್ನು ಹೊಡೆಯುತ್ತಿದ್ದಾನೆ, ದಯವಿಟ್ಟು ಸಹಾಯ ಮಾಡಿ", "language": "kannada"}'
-
-# Hindi - Request for human
-curl -X POST http://localhost:8000/api/test-pipeline \
-  -H "Content-Type: application/json" \
-  -d '{"text": "मुझे इंसान से बात करनी है, AI से नहीं", "language": "hindi"}'
-
-# Confirmation test (use same call_sid)
-curl -X POST http://localhost:8000/api/test-pipeline \
-  -H "Content-Type: application/json" \
-  -d '{"text": "yes that is correct", "call_sid": "test-confirm-1", "language": "english"}'
-```
-
-### Test 3: Dashboard Test Pipeline
-
-1. Open `http://localhost:8501`
-2. Navigate to **🧪 Test Pipeline** in the sidebar
-3. Type a message in any language
-4. Click **Send to Sahayak**
-5. See real-time AI analysis: response, action, urgency, confidence, sentiment
-
-### Test 4: Live Phone Call
-
-1. Ensure ngrok is running and Twilio webhook is configured
-2. Dial your Twilio toll-free number: **(866) 621-2451**
-3. Wait for Sahayak's greeting
-4. Speak your issue in Kannada, Hindi, or English
-5. Watch the dashboard for live updates
-
----
-
-## 🎬 Demo Scenarios
-
-### Scenario 1: AI Resolves Automatically (Happy Path)
-
-1. **Call in** and say: _"My mobile phone was stolen at Majestic bus stand"_
-2. **Sahayak** detects: English, theft category, moderate urgency
-3. **Similarity Match** finds a matching resolved case (mobile theft at bus stand)
-4. **Sahayak** proposes resolution: _"I understand your phone was stolen. I'm registering an FIR. Please block your SIM. Your nearest station is..."_
-5. **Vachan Loop**: _"Is this correct? Please say yes or no."_
-6. **Caller says**: _"Yes"_
-7. **Sahayak** confirms: _"Complaint registered. Reference: SAH-ABC123. An officer will follow up within 30 minutes."_
-8. **Result**: Call resolved entirely by AI. Added to knowledge base. ✅
-
-### Scenario 2: Handover — Caller Requests Human
-
-1. **Call in** and say: _"मुझे इंसान से बात करनी है"_ (I want to talk to a human)
-2. **Sahayak** detects: Hindi, caller wants human
-3. **Agent Routing**: Finds best match (Hindi-speaking, lowest wait)
-4. **Warm Transfer**: _"I'm connecting you to Inspector Pradeep Singh now. I've shared your details with them."_
-5. **Agent Dashboard** shows: transcript, summary, sentiment, one-click correction buttons
-
-### Scenario 3: Handover — Extreme Urgency
-
-1. **Call in** with distressed voice: _"ನನ್ನ ಗಂಡ ನನ್ನನ್ನು ಹೊಡೆಯುತ್ತಿದ್ದಾನೆ!"_ (My husband is hitting me!)
-2. **Sahayak** detects: Kannada, domestic, urgency 0.95, distressed
-3. **Immediate handover** triggered (extreme urgency + distress)
-4. **Routes to**: Language-matched + domestic violence specialist
-5. **Dashboard**: Red urgency bar, distressed badge, full context for officer
-
-### Scenario 4: Queue + IVR Surge
-
-1. All agents are busy (set all agents to "Busy" in dashboard)
-2. **Call in** with an issue
-3. **Handover triggered** but no agents available
-4. **Sahayak**: _"All officers are currently busy. You are in priority queue. Press 1 for Police, 2 for Ambulance, 3 for Fire."_
-5. **Press 1** → Immediate redirect to Police
-6. **No response for 2 min** → Auto-transfer as "High-Help Alert"
-
-### Scenario 5: Low Confidence (Retry + Handover)
-
-1. **Call in** with unclear/mixed language speech
-2. **Sahayak** detects: Low confidence (< 0.5), attempt 1
-3. **Sahayak**: _"I didn't quite understand. Could you please repeat your concern?"_
-4. **Speak again** (still unclear)
-5. **Sahayak**: Attempt 2, still low confidence → triggers handover
-6. **Routes to agent** with full transcript of both attempts
-
----
-
-## 📡 API Reference
-
-### Twilio Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/twilio/incoming` | Webhook for incoming calls (returns TwiML) |
-| `POST` | `/twilio/status` | Status callback (ringing, completed, etc.) |
-| `WS` | `/twilio/media-stream` | Bidirectional WebSocket for audio |
-
-### Dashboard / REST API
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/test-pipeline` | Test AI pipeline with text (no phone) |
-| `GET` | `/api/active-calls` | Currently active calls (in-memory) |
-| `GET` | `/api/call-logs` | Recent call logs from database |
-| `GET` | `/api/agents` | All registered agents |
-| `POST` | `/api/agent/toggle` | Toggle agent availability |
-| `GET` | `/api/complaints` | Registered complaints |
-| `GET` | `/api/resolved-cases` | Knowledge base of resolved cases |
-| `GET` | `/health` | Health check |
-
----
-
-## 🔧 Configuration Options
-
-### Switching to Grok (instead of OpenAI)
+3. Set `.env`:
 
 ```env
-OPENAI_API_KEY=your_grok_api_key
-OPENAI_BASE_URL=https://api.x.ai/v1
-LLM_MODEL=grok-2
+BASE_URL=https://your-ngrok-url.ngrok-free.app
+TWILIO_ACCOUNT_SID=your_sid
+TWILIO_AUTH_TOKEN=your_token
+TWILIO_PHONE_NUMBER=your_twilio_number
 ```
 
-### STT/TTS Priority
+4. Restart backend.
+5. In Twilio Console, set the voice webhook:
 
-The system automatically cascades through providers:
-
-**STT**: Bhashini → Deepgram → OpenAI Whisper
-**TTS**: Bhashini → OpenAI TTS
-
-If a provider's API key is not set, it's skipped automatically.
-
----
-
-## 🤝 Handover Logic (Detailed)
-
-### Three handover conditions (and ONLY these):
-
-1. **Low Confidence** — AI can't understand the caller after 2 attempts
-2. **Caller Requests Human** — Explicit request ("I want to speak to an officer")
-3. **Extreme Urgency + Distress** — Urgency ≥ 0.9 AND sentiment is distressed/angry
-
-### Agent Scoring Formula
-
-```
-Score = (0.50 × Specialty Match) + (0.40 × Language Match) + (0.10 × Wait Time Score)
+```text
+POST {BASE_URL}/twilio/incoming
 ```
 
-- **Specialty Match (50%)**: Agent's specialties include the call's category
-- **Language Match (40%)**: Agent speaks the caller's language
-- **Wait Time (10%)**: Lower average wait time → higher score
-- **Load Penalty**: -15% if agent has > 2 active calls
+6. Call the Twilio number, or ask Sahayak to call your phone:
 
-### Warm Transfer Includes
+```bash
+curl -X POST http://localhost:8000/api/call-me \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"+91XXXXXXXXXX"}'
+```
 
-- ✅ Full live transcript
-- ✅ AI-generated summary
-- ✅ Sentiment flag
-- ✅ Urgency score
-- ✅ One-click correction buttons (on dashboard)
+Twilio should connect to:
 
----
+```text
+wss://<ngrok-host>/twilio/media-stream
+```
 
-## 🗄️ Database Schema
+## API Reference
 
-### `resolved_cases`
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID | Primary key |
-| summary | TEXT | Issue description |
-| category | TEXT | theft, domestic, accident, etc. |
-| language | TEXT | kannada, hindi, english |
-| resolution | TEXT | How it was resolved |
-| tags | TEXT[] | Searchable tags |
-| created_at | TIMESTAMPTZ | Auto-set |
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/twilio/incoming` | Incoming Twilio voice webhook |
+| `POST` | `/twilio/status` | Twilio call status callback |
+| `WS` | `/twilio/media-stream` | Bidirectional audio WebSocket |
+| `POST` | `/api/call-me` | Start outbound call to a phone number |
+| `POST` | `/api/test-pipeline` | Text-only pipeline test |
+| `GET` | `/api/active-calls` | Live active calls for dashboard |
+| `GET` | `/api/call-logs` | Recent call logs |
+| `GET` | `/api/call-transcript/{call_sid}` | Transcript for one call |
+| `GET` | `/api/call-events` | Audit events, optionally filtered by `call_sid` |
+| `GET` | `/api/agents` | Officer list |
+| `POST` | `/api/agent/toggle` | Toggle officer availability |
+| `POST` | `/api/handover/{call_sid}/accept` | Officer accepts a warm handover |
+| `GET` | `/api/queue` | Priority queue entries |
+| `GET` | `/api/queue/{call_sid}` | One queue entry |
+| `GET` | `/api/complaints` | Structured complaints/actions |
+| `GET` | `/api/complaints/{reference_id}/timeline` | Complaint timeline |
+| `GET` | `/api/resolved-cases` | Resolved case knowledge base |
+| `GET` | `/health` | Service health |
 
-### `agents`
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID | Primary key |
-| name | TEXT | Officer name |
-| badge_id | TEXT | Unique badge number |
-| phone | TEXT | Contact number |
-| languages | TEXT[] | Spoken languages |
-| specialties | TEXT[] | domestic, cyber, traffic, etc. |
-| is_available | BOOLEAN | Currently online |
-| current_load | INT | Active call count |
-| avg_wait_sec | INT | Average wait time |
+## Demo Guide
 
-### `call_logs`
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID | Primary key |
-| call_sid | TEXT | Twilio Call SID |
-| caller_number | TEXT | Caller's phone |
-| language | TEXT | Detected language |
-| sentiment | TEXT | calm, anxious, distressed, angry |
-| urgency | FLOAT | 0.0 – 1.0 |
-| confidence | FLOAT | 0.0 – 1.0 |
-| transcript | JSONB | Full conversation log |
-| ai_summary | TEXT | AI-generated summary |
-| outcome | TEXT | ai_resolved, handed_over, queued |
+For a stable competition demo, use this order:
 
-### `complaints`
-| Column | Type | Description |
-|--------|------|-------------|
-| id | UUID | Primary key |
-| call_log_id | UUID | Links to call_logs |
-| category | TEXT | Issue category |
-| description | TEXT | Full description |
-| status | TEXT | registered, in_progress, resolved |
+1. Open `/health` and show service readiness.
+2. Open the Streamlit dashboard.
+3. Run a text pipeline call for a phone theft or waterlogging issue.
+4. Show language, urgency, confidence, and AI summary.
+5. Show Smart Similarity match and adapted resolution.
+6. Show the Vachan confirmation prompt.
+7. Send `yes` with the same `call_sid`.
+8. Show generated complaint reference ID and complaint timeline.
+9. Toggle officers unavailable and trigger a human-request call.
+10. Show priority queue and High-Help Alert behavior.
+11. Toggle an officer available and show warm handover context.
+12. If Twilio is configured, repeat the story with a live phone call.
 
----
+## Production Notes
 
-## 🛡️ Production Considerations
+Sahayak is built so development remains easy, while production concerns are explicit.
 
-For a production deployment, add:
+- Use `TRANSFER_MODE=mock` for local demos and `TRANSFER_MODE=twilio` for real call transfer testing.
+- Run `backend/persistence/models.sql` whenever Supabase schema changes.
+- Keep `DEMO_MODE=true` for hackathon demos with shorter queue timeout.
+- Use `DEMO_MODE=false` for production-like behavior.
+- Store real secrets only in `.env` or your deployment secret manager.
+- Use Supabase for durable records and pgvector retrieval.
+- Use Redis when multiple backend workers need shared live call state.
+- Review PII retention and masking rules before real deployment.
 
-- [ ] **Authentication** on dashboard and APIs
-- [ ] **pgvector** embeddings for true semantic similarity search
-- [ ] **Redis** for call state (instead of in-memory dict)
-- [ ] **Twilio Conference** for actual warm transfers
-- [ ] **Rate limiting** on all endpoints
-- [ ] **SSL/TLS** in production (not just ngrok)
-- [ ] **Logging** with structured JSON logs (ELK/Datadog)
-- [ ] **Monitoring** with Prometheus/Grafana
-- [ ] **Load testing** with Locust
-- [ ] **Multi-region** deployment for low latency
+## Developer Commands
 
----
+```bash
+make PYTHON=.venv/bin/python install
+make PYTHON=.venv/bin/python dev-backend
+make PYTHON=.venv/bin/python dev-dashboard
+make PYTHON=.venv/bin/python test
+make PYTHON=.venv/bin/python lint
+make PYTHON=.venv/bin/python format
+make PYTHON=.venv/bin/python smoke
+make PYTHON=.venv/bin/python seed-vector-cases
+make PYTHON=.venv/bin/python backfill-vector-embeddings
+```
 
-## 📄 License
+## License
 
-Built for **AI for Bharat 2026** Hackathon — Theme 12: AI for 1092 Helpline.
-
----
-
-<p align="center">
-  <strong>Sahayak 1092</strong> · Built with ❤️ for Bharat
-</p>
+Built for AI for Bharat 2026, Theme 12: AI for 1092 Helpline.

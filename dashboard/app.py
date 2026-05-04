@@ -15,12 +15,11 @@ Features:
 """
 
 import os
-import sys
 import time
-import json
+from datetime import datetime
+
 import requests
 import streamlit as st
-from datetime import datetime
 
 # ── Config ──────────────────────────────────────
 API_BASE = os.getenv("SAHAYAK_API_URL", "http://localhost:8000")
@@ -119,9 +118,17 @@ st.markdown("""
     .badge-angry { background: #7f1d1d; color: #fca5a5; }
     .badge-listening { background: #1e3a5f; color: #93c5fd; }
     .badge-confirming { background: #4c1d95; color: #c4b5fd; }
+    .badge-collecting_issue { background: #1e3a5f; color: #93c5fd; }
+    .badge-clarifying { background: #78350f; color: #fcd34d; }
+    .badge-vachan_pending { background: #4c1d95; color: #c4b5fd; }
+    .badge-vachan_partial { background: #6d28d9; color: #ddd6fe; }
     .badge-resolved { background: #064e3b; color: #6ee7b7; }
     .badge-handover { background: #7c2d12; color: #fb923c; }
+    .badge-handover_pending { background: #7c2d12; color: #fb923c; }
     .badge-queued { background: #78350f; color: #fcd34d; }
+    .badge-waiting { background: #78350f; color: #fcd34d; }
+    .badge-redirected { background: #1e3a5f; color: #93c5fd; }
+    .badge-high_help_alert { background: #7f1d1d; color: #fca5a5; }
 
     /* ── Urgency Bar ── */
     .urgency-bar {
@@ -223,6 +230,9 @@ def render_header():
     complaints_data = api_get("/api/complaints")
     total_complaints = complaints_data.get("count", 0)
 
+    queue_data = api_get("/api/queue")
+    queue_count = queue_data.get("count", 0)
+
     st.markdown(f"""
     <div class="header-container">
         <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -253,6 +263,10 @@ def render_header():
                 <div class="stat-value" style="color:#fbbf24;">{total_complaints}</div>
                 <div class="stat-label">Complaints</div>
             </div>
+            <div class="stat-box">
+                <div class="stat-value" style="color:#fb923c;">{queue_count}</div>
+                <div class="stat-label">Queue</div>
+            </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -277,12 +291,58 @@ def render_active_calls():
         sid_short = call.get("call_sid", "?")[-8:]
         language = call.get("language", "unknown").title()
         phase = call.get("phase", "unknown")
-        sentiment = "calm"
         summary = call.get("ai_summary", "Analysing...")
+        handover_context = call.get("handover_context") or {}
+        selected_agent = handover_context.get("selected_agent") or {}
+        routing_breakdown = handover_context.get("routing_score_breakdown") or call.get("routing_score_breakdown") or {}
+        officer_first_sentence = (
+            handover_context.get("officer_first_sentence")
+            or call.get("officer_first_sentence")
+            or ""
+        )
+        similarity_score = call.get("similarity_score")
+        similarity_source = call.get("similarity_source") or "local_fallback"
+        matched_case_id = call.get("matched_case_id")
+        similarity_html = ""
+        if similarity_score:
+            similarity_html = f"""
+            <p style="color:#a7f3d0; margin:4px 0 0; font-size:0.78rem;">
+                <strong>Similarity Match:</strong> {int(float(similarity_score) * 100)}%
+                <span style="color:rgba(255,255,255,0.4);">• {matched_case_id or 'resolved case'} • {similarity_source}</span>
+            </p>
+            """
+        queue_status = call.get("queue_status") or ""
+        queue_position = call.get("queue_position")
+        queue_wait = call.get("queue_estimated_wait_sec")
+        queue_service = call.get("queue_service_target") or ""
+        queue_html = ""
+        if queue_status:
+            queue_label = queue_status.replace("_", " ").title()
+            position_text = f"Position {queue_position}" if queue_position else "Priority queue"
+            wait_text = f"Estimated wait {queue_wait}s" if queue_wait is not None else "Wait calculating"
+            service_text = f" • Target: {queue_service.title()}" if queue_service else ""
+            queue_html = f"""
+            <p style="color:#fcd34d; margin:4px 0 0; font-size:0.78rem;">
+                <span class="badge badge-{queue_status}">{queue_label}</span>
+                <span style="color:rgba(255,255,255,0.55); margin-left:6px;">
+                    {position_text} • {wait_text}{service_text}
+                </span>
+            </p>
+            """
 
-        # Sentiment badge
-        badge_class = f"badge-{sentiment}"
-        phase_class = f"badge-{phase}" if phase in ("listening", "confirming", "resolved", "handover", "queued") else "badge-listening"
+        known_phases = (
+            "listening",
+            "confirming",
+            "collecting_issue",
+            "clarifying",
+            "vachan_pending",
+            "vachan_partial",
+            "resolved",
+            "handover",
+            "handover_pending",
+            "queued",
+        )
+        phase_class = f"badge-{phase}" if phase in known_phases else "badge-listening"
 
         st.markdown(f"""
         <div class="call-card">
@@ -303,20 +363,44 @@ def render_active_calls():
             <p style="color:rgba(255,255,255,0.7); margin:8px 0 4px; font-size:0.85rem;">
                 <strong>AI Summary:</strong> {summary}
             </p>
+            {similarity_html}
+            {queue_html}
         </div>
         """, unsafe_allow_html=True)
 
         # Action buttons
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button(f"📞 Take Call", key=f"take_{sid_short}"):
-                st.success(f"Taking over call {sid_short}...")
+            if st.button("📞 Take Call", key=f"take_{sid_short}"):
+                if phase == "handover_pending" and selected_agent.get("id"):
+                    result = api_post(
+                        f"/api/handover/{call.get('call_sid')}/accept",
+                        {"agent_id": selected_agent["id"]},
+                    )
+                    if result.get("status") == "ok":
+                        st.success(f"Warm handover accepted for {sid_short}")
+                        st.json(result.get("transfer", {}), expanded=False)
+                    else:
+                        st.error(result.get("detail") or result.get("error") or "Handover failed")
+                else:
+                    st.success(f"Taking over call {sid_short}...")
         with col2:
-            if st.button(f"📋 View Transcript", key=f"transcript_{sid_short}"):
+            if st.button("📋 View Transcript", key=f"transcript_{sid_short}"):
                 st.session_state[f"show_transcript_{sid_short}"] = True
         with col3:
-            if st.button(f"✏️ Correct AI", key=f"correct_{sid_short}"):
+            if st.button("✏️ Correct AI", key=f"correct_{sid_short}"):
                 st.session_state[f"show_correct_{sid_short}"] = True
+
+        # Transcript viewer
+        if handover_context:
+            with st.expander("Warm Handover Context", expanded=phase == "handover_pending"):
+                st.write(f"**Selected officer:** {selected_agent.get('name', 'Unknown')}")
+                st.write(f"**Routing score:** {handover_context.get('routing_score', 0):.3f}")
+                st.write(f"**First sentence:** {officer_first_sentence}")
+                st.write("**Score breakdown**")
+                st.json(routing_breakdown, expanded=False)
+                st.write("**Ranked agents**")
+                st.json(handover_context.get("ranked_agents", []), expanded=False)
 
         # Transcript viewer
         if st.session_state.get(f"show_transcript_{sid_short}"):
@@ -335,7 +419,7 @@ def render_active_calls():
                 )
                 new_urgency = st.slider("Urgency", 0.0, 1.0, 0.5, key=f"urg_{sid_short}")
                 if st.button("Apply Corrections", key=f"apply_{sid_short}"):
-                    st.success("Corrections applied!")
+                    st.success(f"Corrections applied: {new_cat}, urgency {new_urgency:.2f}")
 
         st.markdown("---")
 
@@ -367,9 +451,9 @@ def render_call_history():
     # Filter
     filtered = logs
     if outcome_filter != "All":
-        filtered = [l for l in filtered if l.get("outcome") == outcome_filter]
+        filtered = [log for log in filtered if log.get("outcome") == outcome_filter]
     if lang_filter != "All":
-        filtered = [l for l in filtered if l.get("language") == lang_filter]
+        filtered = [log for log in filtered if log.get("language") == lang_filter]
     if sort_by == "Highest Urgency":
         filtered.sort(key=lambda x: x.get("urgency", 0), reverse=True)
 
@@ -390,6 +474,18 @@ def render_call_history():
         sentiment = log.get("sentiment", "calm") or "calm"
         outcome = log.get("outcome", "in_progress") or "in_progress"
         created = log.get("created_at", "")[:19] if log.get("created_at") else ""
+        similarity_score = log.get("similarity_score")
+        similarity_source = log.get("similarity_source") or "local_fallback"
+        similarity_html = ""
+        if similarity_score:
+            similarity_html = f"""
+            <p style="color:#a7f3d0; margin:4px 0 0; font-size:0.78rem;">
+                <strong>Similarity:</strong> {int(float(similarity_score) * 100)}%
+                <span style="color:rgba(255,255,255,0.4);">
+                    • {log.get('similar_case') or 'resolved case'} • {similarity_source}
+                </span>
+            </p>
+            """
 
         st.markdown(f"""
         <div class="call-card">
@@ -412,6 +508,7 @@ def render_call_history():
             <p style="color:rgba(255,255,255,0.7); margin:6px 0 2px; font-size:0.85rem;">
                 {log.get('ai_summary', 'No summary available')}
             </p>
+            {similarity_html}
             <div style="display:flex; align-items:center; gap:8px; margin-top:4px;">
                 <span style="color:rgba(255,255,255,0.5); font-size:0.72rem;">
                     Urgency: {urgency_pct}%
@@ -541,6 +638,8 @@ def render_complaints():
 
     for c in complaints:
         status = c.get("status", "registered") or "registered"
+        reference_id = c.get("reference_id") or "missing-reference"
+        call_sid = c.get("call_sid") or ""
         status_colors = {
             "registered": "#fbbf24",
             "in_progress": "#3b82f6",
@@ -551,9 +650,14 @@ def render_complaints():
         st.markdown(f"""
         <div class="call-card">
             <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span style="color:#fff; font-weight:600;">
-                    {(c.get('category', 'general') or 'general').upper()}
-                </span>
+                <div>
+                    <span style="color:#fff; font-weight:600;">
+                        {(c.get('category', 'general') or 'general').upper()}
+                    </span>
+                    <span style="color:rgba(255,255,255,0.45); margin-left:8px; font-size:0.76rem;">
+                        {reference_id}
+                    </span>
+                </div>
                 <span style="color:{color}; font-weight:600; font-size:0.82rem;">
                     ● {status.upper()}
                 </span>
@@ -562,8 +666,101 @@ def render_complaints():
                 {c.get('description', 'No description')}
             </p>
             <p style="color:rgba(255,255,255,0.4); font-size:0.72rem;">
-                {c.get('location', '')} • Created: {(c.get('created_at', '') or '')[:19]}
+                {c.get('location', '') or 'Location not captured'} •
+                Urgency: {float(c.get('urgency') or 0):.2f} •
+                {c.get('language', 'unknown')} •
+                Call: {call_sid[-8:] if call_sid else 'n/a'} •
+                Created: {(c.get('created_at', '') or '')[:19]}
             </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander(f"Timeline · {reference_id}", expanded=False):
+            timeline_data = api_get(f"/api/complaints/{reference_id}/timeline")
+            timeline = timeline_data.get("timeline", [])
+            if not timeline:
+                st.caption("No timeline events available yet.")
+            for event in timeline:
+                st.markdown(
+                    f"**{event.get('event_type', 'event')}** · "
+                    f"{(event.get('created_at', '') or '')[:19]}"
+                )
+                st.json(event.get("payload", {}), expanded=False)
+
+
+# ──────────────────────────────────────────────
+# PRIORITY QUEUE
+# ──────────────────────────────────────────────
+
+def render_queue():
+    """Render surge queue and High-Help Alert state."""
+    st.subheader("Priority Queue")
+
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        include_inactive = st.toggle("Show handled entries", value=True)
+    endpoint = f"/api/queue?include_inactive={'true' if include_inactive else 'false'}&limit=50"
+    data = api_get(endpoint)
+    entries = data.get("queue", [])
+
+    if "error" in data:
+        st.error(f"Queue unavailable: {data['error']}")
+        return
+
+    timeout_sec = data.get("high_help_alert_timeout_sec", 120)
+    demo_mode = data.get("demo_mode", False)
+    st.caption(
+        f"High-Help Alert timeout: {timeout_sec}s"
+        + (" in demo mode" if demo_mode else "")
+    )
+
+    if not entries:
+        st.info("No calls are waiting in the priority queue.")
+        return
+
+    high_help_count = sum(1 for item in entries if item.get("status") == "high_help_alert")
+    waiting_count = sum(1 for item in entries if item.get("status") == "waiting")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Waiting", waiting_count)
+    c2.metric("High-Help Alerts", high_help_count)
+    c3.metric("Total Shown", len(entries))
+
+    for item in entries:
+        status = item.get("status", "waiting") or "waiting"
+        status_label = status.replace("_", " ").title()
+        sid_short = (item.get("call_sid") or "?")[-8:]
+        urgency = float(item.get("urgency") or 0)
+        priority = float(item.get("priority_score") or 0)
+        wait_sec = item.get("estimated_wait_sec")
+        service_target = item.get("service_target") or ""
+        created = (item.get("created_at") or "")[:19]
+        alert_style = "border-color:rgba(248,113,113,0.8);" if status == "high_help_alert" else ""
+
+        st.markdown(f"""
+        <div class="call-card" style="{alert_style}">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                    <span style="color:#fff; font-weight:600;">
+                        {item.get('caller_number') or 'Unknown caller'}
+                    </span>
+                    <span style="color:rgba(255,255,255,0.4); margin-left:8px; font-size:0.75rem;">
+                        SID: {sid_short} • {created}
+                    </span>
+                </div>
+                <span class="badge badge-{status}">{status_label}</span>
+            </div>
+            <p style="color:rgba(255,255,255,0.72); margin:8px 0 4px; font-size:0.85rem;">
+                {(item.get('category') or 'general').title()} •
+                {(item.get('language') or 'unknown').title()}
+                {(' • ' + service_target.title()) if service_target else ''}
+            </p>
+            <div style="display:flex; gap:1.5rem; color:rgba(255,255,255,0.58); font-size:0.78rem;">
+                <span>Position: {item.get('position') or '-'}</span>
+                <span>Wait: {wait_sec if wait_sec is not None else '-'}s</span>
+                <span>Urgency: {urgency:.0%}</span>
+                <span>Priority: {priority:.0%}</span>
+                <span>Reason: {item.get('reason') or 'surge'}</span>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -706,7 +903,7 @@ def render_test_pipeline():
 
                 if "error" not in result:
                     st.markdown("---")
-                    st.markdown(f"**🤖 Sahayak says:**")
+                    st.markdown("**🤖 Sahayak says:**")
                     st.success(result.get("response", "No response"))
                     st.markdown(f"**Action:** `{result.get('action', '?')}`")
 
@@ -716,6 +913,22 @@ def render_test_pipeline():
                     c2.metric("Urgency", f"{cs.get('urgency', 0):.0%}")
                     c3.metric("Confidence", f"{cs.get('confidence', 0):.0%}")
                     c4.metric("Sentiment", cs.get("sentiment", "?"))
+                    if cs.get("queue_status"):
+                        st.warning(
+                            "Queue: "
+                            f"{cs.get('queue_status')} • "
+                            f"position {cs.get('queue_position') or '-'} • "
+                            f"wait {cs.get('queue_estimated_wait_sec') if cs.get('queue_estimated_wait_sec') is not None else '-'}s"
+                        )
+                    similarity = result.get("similarity") or {}
+                    if similarity:
+                        st.info(
+                            "Matched resolved case "
+                            f"`{similarity.get('matched_case_id')}` at "
+                            f"{float(similarity.get('similarity_score', 0)):.0%} similarity "
+                            f"via `{similarity.get('retrieval_source', 'local_fallback')}`."
+                        )
+                        st.caption(similarity.get("adapted_resolution", ""))
                 else:
                     st.error(f"Error: {result['error']}")
             else:
@@ -749,6 +962,7 @@ with st.sidebar:
         [
             "📞 Call Me",
             "📞 Active Calls",
+            "🚦 Queue",
             "📊 Call History",
             "👮 Agents",
             "📚 Knowledge Base",
@@ -781,6 +995,8 @@ if page == "📞 Call Me":
     render_call_me()
 elif page == "📞 Active Calls":
     render_active_calls()
+elif page == "🚦 Queue":
+    render_queue()
 elif page == "📊 Call History":
     render_call_history()
 elif page == "👮 Agents":

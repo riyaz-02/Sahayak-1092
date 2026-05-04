@@ -11,233 +11,172 @@ Handles ALL intelligence:
   • Response generation in caller's language
 """
 
-import os
-import json
-import asyncio
+import time
 from typing import Optional
-from dataclasses import dataclass, field, asdict
-from enum import Enum
 
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
+from backend.config import get_settings
+from backend.intelligence.analyzer import analyze_call_utterance
+from backend.intelligence.schemas import (
+    CallAnalysis,
+    CallOutcome,
+    CallPhase,
+    CallState,
+    ConfirmationStatus,
+    DecisionAction,
+    DecisionResult,
+    HandoverContext,
+    SimilarityMatch,
+)
+from backend.intelligence.safety_rules import evaluate_handover
+from backend.intelligence.similarity import (
+    find_similar_resolved_case,
+    generate_case_embedding,
+    serializable_embedding,
+    urgency_band,
+)
+from backend.persistence.complaints import get_complaint_registry
+from backend.persistence.repository import get_call_repository, state_to_dict
+from backend.routing.officer_router import (
+    score_agent as _score_agent,
+    select_best_agent,
+)
+from backend.routing.queue_manager import get_queue_manager
 from backend import supabase_client as db
 
 load_dotenv()
+settings = get_settings()
+call_repository = get_call_repository()
+complaint_registry = get_complaint_registry()
+queue_manager = get_queue_manager()
 
 # ── LLM Client ──────────────────────────────────
 client = AsyncOpenAI(
-    api_key=os.getenv("OPENAI_API_KEY", ""),
-    base_url=os.getenv("OPENAI_BASE_URL", None),  # Gemini: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key=settings.openai_api_key or "local-dev-missing-openai-key",
+    base_url=settings.openai_base_url,  # Gemini: https://generativelanguage.googleapis.com/v1beta/openai/
 )
-MODEL = os.getenv("LLM_MODEL", "gpt-4o")
-
-
-def extract_json(text: str) -> dict:
-    """Extract JSON from LLM response — handles markdown code fences from Gemini."""
-    import re
-    text = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`").strip()
-    return json.loads(text)
-
-# ── Data Models ──────────────────────────────────
-
-class CallOutcome(str, Enum):
-    AI_RESOLVED = "ai_resolved"
-    HANDED_OVER = "handed_over"
-    QUEUED = "queued"
-    IN_PROGRESS = "in_progress"
-
-
-class HandoverReason(str, Enum):
-    LOW_CONFIDENCE = "low_confidence_after_retries"
-    CALLER_REQUESTED = "caller_requested_human"
-    HIGH_URGENCY = "extreme_urgency_distress"
-
-
-@dataclass
-class CallAnalysis:
-    """Result of analysing a caller's utterance."""
-    language: str = "english"          # detected language
-    dialect: str = ""                  # regional dialect if any
-    sentiment: str = "calm"            # calm, anxious, distressed, angry
-    urgency: float = 0.5              # 0.0 (routine) → 1.0 (life-threatening)
-    confidence: float = 0.7           # how confident the AI is in understanding
-    category: str = "general"          # theft, accident, domestic, etc.
-    summary: str = ""                  # one-line summary of the issue
-    caller_wants_human: bool = False   # explicit request for human
-    is_confirmation: Optional[bool] = None  # True/False/None for vachan loop
-    raw_text: str = ""
-
-
-@dataclass
-class CallState:
-    """Tracks the full state of an active call."""
-    call_sid: str = ""
-    caller_number: str = ""
-    language: str = "english"
-    dialect: str = ""
-    transcript: list = field(default_factory=list)
-    analyses: list = field(default_factory=list)
-    current_phase: str = "greeting"   # greeting, listening, confirming, resolved, handover, queued
-    attempt_count: int = 0            # for low-confidence retries
-    ai_summary: str = ""
-    resolution: str = ""
-    similar_case: Optional[dict] = None
-    agent_id: Optional[str] = None
-    outcome: Optional[CallOutcome] = None
-    handover_reason: Optional[HandoverReason] = None
-    complaint_registered: bool = False
-    queue_start_time: Optional[float] = None
-
+MODEL = settings.llm_model
 
 # ── In-memory active calls ──────────────────────
 active_calls: dict[str, CallState] = {}
 
 
+VACHAN_PHASES = {
+    CallPhase.CONFIRMING.value,
+    CallPhase.VACHAN_PENDING.value,
+    CallPhase.VACHAN_PARTIAL.value,
+}
+
+
+def _decision_result(
+    response_text: str,
+    action: DecisionAction,
+    call_state: CallState,
+    analysis: CallAnalysis,
+    *,
+    agent: dict | None = None,
+    handover_context: dict | None = None,
+    similarity: SimilarityMatch | None = None,
+    reason: str | None = None,
+) -> dict:
+    return DecisionResult(
+        response_text=response_text,
+        action=action,
+        call_state=state_to_dict(call_state),
+        analysis=analysis,
+        agent=agent,
+        handover_context=handover_context,
+        similarity=similarity,
+        reason=reason,
+    ).as_response()
+
+
+def _is_vachan_phase(call_state: CallState) -> bool:
+    return call_state.current_phase in VACHAN_PHASES
+
+
 def get_or_create_call(call_sid: str, caller_number: str = "") -> CallState:
     """Get existing call state or create new one."""
-    if call_sid not in active_calls:
-        active_calls[call_sid] = CallState(
-            call_sid=call_sid,
-            caller_number=caller_number,
-        )
+    if call_sid in active_calls:
+        state = active_calls[call_sid]
+        if caller_number and not state.caller_number:
+            state.caller_number = caller_number
+            call_repository.update_call_state(state)
+        return state
+
+    state = call_repository.get_call_state(call_sid)
+    if state:
+        if caller_number and not state.caller_number:
+            state.caller_number = caller_number
+            call_repository.update_call_state(state)
+        active_calls[call_sid] = state
+        return state
+
+    active_calls[call_sid] = CallState(
+        call_sid=call_sid,
+        caller_number=caller_number,
+    )
+    call_repository.create_call_state(active_calls[call_sid])
+    call_repository.append_call_event(
+        call_sid=call_sid,
+        event_type="call_started",
+        payload={"caller_number": caller_number},
+        call_state=active_calls[call_sid],
+    )
     return active_calls[call_sid]
 
 
 def remove_call(call_sid: str):
     """Clean up after call ends."""
+    state = active_calls.get(call_sid) or call_repository.get_call_state(call_sid)
+    if state:
+        call_repository.append_call_event(
+            call_sid=call_sid,
+            event_type="call_completed",
+            payload={"outcome": state.outcome.value if state.outcome else None},
+            call_state=state,
+        )
     active_calls.pop(call_sid, None)
+    call_repository.remove_call_state(call_sid)
 
 
 # ──────────────────────────────────────────────
 # 1. ANALYSE UTTERANCE
 # ──────────────────────────────────────────────
 
-ANALYSIS_SYSTEM_PROMPT = """You are the AI brain of Sahayak 1092, India's emergency helpline.
-Analyse the caller's message and return a JSON object with these fields:
-{
-  "language": "kannada" | "hindi" | "english" | "telugu" | "tamil" | "urdu",
-  "dialect": "string – regional dialect if identifiable, else empty",
-  "sentiment": "calm" | "anxious" | "distressed" | "angry",
-  "urgency": 0.0 to 1.0 (0 = routine, 0.5 = moderate, 0.8+ = life-threatening),
-  "confidence": 0.0 to 1.0 (how well you understood the issue),
-  "category": "theft" | "accident" | "domestic" | "cyber" | "noise" | "missing_person" | "suspicious_activity" | "medical" | "fire" | "traffic" | "general",
-  "summary": "one-line summary of the caller's issue",
-  "caller_wants_human": true/false,
-  "is_confirmation": true | false | null (if this is a yes/no response to a confirmation question)
-}
-Only output valid JSON. No markdown, no explanation."""
-
-
 async def analyse_utterance(text: str, call_state: CallState) -> CallAnalysis:
-    """Use LLM to analyse a caller's utterance for language, sentiment, urgency, etc."""
-    context = ""
-    if call_state.transcript:
-        recent = call_state.transcript[-6:]  # last 3 exchanges
-        context = "\n".join([f"{t['role']}: {t['text']}" for t in recent])
+    """Analyze a caller utterance through the configured structured analyzer."""
 
-    messages = [
-        {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Conversation so far:\n{context}\n\nNew caller message: \"{text}\""},
-    ]
-
-    for attempt in range(2):
-        try:
-            resp = await client.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=300,
-            )
-            data = extract_json(resp.choices[0].message.content)
-            analysis = CallAnalysis(
-                language=data.get("language", "english"),
-                dialect=data.get("dialect", ""),
-                sentiment=data.get("sentiment", "calm"),
-                urgency=float(data.get("urgency", 0.5)),
-                confidence=float(data.get("confidence", 0.7)),
-                category=data.get("category", "general"),
-                summary=data.get("summary", text[:100]),
-                caller_wants_human=data.get("caller_wants_human", False),
-                is_confirmation=data.get("is_confirmation", None),
-                raw_text=text,
-            )
-            call_state.language = analysis.language
-            call_state.dialect = analysis.dialect
-            call_state.analyses.append(asdict(analysis))
-            return analysis
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str and attempt == 0:
-                import re as _re
-                wait = 5
-                m = _re.search(r'retryDelay.*?(\d+)s', err_str)
-                if m:
-                    wait = min(int(m.group(1)), 15)
-                print(f"⏳ LLM quota 429 — retrying in {wait}s...")
-                await asyncio.sleep(wait)
-                continue
-            print(f"❌ Analysis error: {e}")
-            return CallAnalysis(raw_text=text, summary=text[:100])
-    return CallAnalysis(raw_text=text, summary=text[:100])
+    analysis = await analyze_call_utterance(
+        text=text,
+        call_state=call_state,
+        settings=settings,
+        client=client,
+    )
+    call_state.language = analysis.language
+    call_state.dialect = analysis.dialect
+    call_state.analyses.append(analysis.as_event_payload())
+    return analysis
 
 
 # ──────────────────────────────────────────────
 # 2. SMART SIMILARITY DETECTION
 # ──────────────────────────────────────────────
 
-SIMILARITY_SYSTEM_PROMPT = """You are comparing a new helpline call with previously resolved cases.
-Given the new issue summary and a list of resolved cases, determine:
-1. Is any resolved case similar enough to apply the same resolution? (> 70% match)
-2. If yes, which case and how should the resolution be adapted?
+async def find_similar_case(
+    analysis: CallAnalysis,
+    call_state: CallState,
+) -> SimilarityMatch | None:
+    """Retrieve a similar resolved case, then optionally adapt its resolution."""
 
-Return JSON:
-{
-  "is_similar": true/false,
-  "matched_case_index": 0-based index or -1,
-  "similarity_score": 0.0 to 1.0,
-  "adapted_resolution": "resolution text adapted to the current situation"
-}
-Only valid JSON."""
-
-
-async def find_similar_case(summary: str, category: str) -> Optional[dict]:
-    """Check if a similar case exists in the knowledge base."""
-    # Fetch resolved cases from DB
-    cases = db.get_all_resolved_cases(limit=20)
-    if not cases:
-        return None
-
-    cases_text = "\n".join([
-        f"[{i}] Category: {c.get('category','?')} | Summary: {c.get('summary','')} | Resolution: {c.get('resolution','')}"
-        for i, c in enumerate(cases)
-    ])
-
-    messages = [
-        {"role": "system", "content": SIMILARITY_SYSTEM_PROMPT},
-        {"role": "user", "content": f"New issue:\nCategory: {category}\nSummary: {summary}\n\nResolved cases:\n{cases_text}"},
-    ]
-
-    try:
-        resp = await client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0.1,
-            max_tokens=400,
-        )
-        data = extract_json(resp.choices[0].message.content)
-        if data.get("is_similar") and data.get("similarity_score", 0) >= 0.7:
-            idx = data.get("matched_case_index", -1)
-            if 0 <= idx < len(cases):
-                return {
-                    "matched_case": cases[idx],
-                    "similarity_score": data["similarity_score"],
-                    "adapted_resolution": data.get("adapted_resolution", cases[idx].get("resolution", "")),
-                }
-    except Exception as e:
-        print(f"⚠️  Similarity search error: {e}")
-
-    return None
+    return await find_similar_resolved_case(
+        analysis=analysis,
+        call_state=call_state,
+        settings=settings,
+        llm_client=client,
+    )
 
 
 # ──────────────────────────────────────────────
@@ -271,8 +210,17 @@ async def generate_response(call_state: CallState, analysis: CallAnalysis,
         "greeting": "Greet the caller warmly and ask how you can help. Use their language.",
         "listening": "Acknowledge what they said, show empathy, and ask clarifying questions if needed.",
         "confirming": f"Restate your understanding and the proposed resolution. Ask for yes/no confirmation.\nProposed resolution: {resolution or 'pending'}",
+        "collecting_issue": "Acknowledge the caller and collect the issue in one calm, specific question.",
+        "clarifying": "Ask what was wrong or missing in Sahayak's understanding. Ask for only the correction needed.",
+        "vachan_pending": f"Restate your understanding and the proposed action. Ask for yes, no, or a correction.\nProposed action: {resolution or call_state.resolution or 'pending'}",
+        "vachan_partial": (
+            "Ask only for the missing or incorrect field: "
+            f"{', '.join(call_state.pending_clarification_fields or ['description'])}. "
+            "Do not ask for the entire story again."
+        ),
         "resolved": f"Confirm the action taken, provide a reference/complaint number, and wish them well.\nResolution: {resolution or call_state.resolution}",
         "handover": "Inform the caller you are connecting them to a human officer. Reassure them.",
+        "handover_pending": "Inform the caller you are connecting them to a human officer. Reassure them.",
         "queued": "Inform the caller that all officers are busy. They are in a priority queue. Offer: Press 1 for Police, 2 for Ambulance, 3 for Fire services.",
     }
 
@@ -320,40 +268,14 @@ async def generate_response(call_state: CallState, analysis: CallAnalysis,
 # ──────────────────────────────────────────────
 
 def score_agent(agent: dict, call_state: CallState, analysis: CallAnalysis) -> float:
-    """
-    Score an agent for routing:
-      50% urgency match (specialists)
-      40% language/dialect fit
-      10% shortest wait time
-    """
-    score = 0.0
-
-    # Language match (40%)
-    agent_langs = [l.lower() for l in agent.get("languages", [])]
-    if call_state.language.lower() in agent_langs:
-        score += 0.40
-    elif any(l in agent_langs for l in ["english", "hindi"]):
-        score += 0.15  # partial match
-
-    # Specialty match (50%)
-    agent_specs = [s.lower() for s in agent.get("specialties", [])]
-    category = (analysis.category or "general").lower()
-    if category in agent_specs:
-        score += 0.50
-    elif any(s in agent_specs for s in ["general"]):
-        score += 0.20
-
-    # Wait time (10%) – lower is better
-    avg_wait = agent.get("avg_wait_sec", 60)
-    wait_score = max(0, 1 - (avg_wait / 120))  # 0-120 sec range
-    score += 0.10 * wait_score
-
-    # Penalise high load
-    load = agent.get("current_load", 0)
-    if load > 2:
-        score -= 0.15
-
-    return round(score, 3)
+    """Compatibility wrapper around the production routing module."""
+    return _score_agent(
+        agent=agent,
+        call_language=call_state.language,
+        category=analysis.category,
+        dialect=call_state.dialect or analysis.dialect,
+        urgency=analysis.urgency,
+    )
 
 
 async def route_to_agent(call_state: CallState, analysis: CallAnalysis) -> Optional[dict]:
@@ -365,15 +287,58 @@ async def route_to_agent(call_state: CallState, analysis: CallAnalysis) -> Optio
     if not agents:
         return None
 
-    scored = [(agent, score_agent(agent, call_state, analysis)) for agent in agents]
-    scored.sort(key=lambda x: x[1], reverse=True)
+    return select_best_agent(
+        agents=agents,
+        call_language=call_state.language,
+        category=analysis.category,
+        dialect=call_state.dialect or analysis.dialect,
+        urgency=analysis.urgency,
+    )
 
-    best_agent, best_score = scored[0]
-    return {
-        "agent": best_agent,
-        "score": best_score,
-        "reason": f"Language: {call_state.language}, Category: {analysis.category}",
-    }
+
+def _build_officer_first_sentence(
+    agent: dict,
+    call_state: CallState,
+    analysis: CallAnalysis,
+) -> str:
+    """Create a calm first sentence so the officer does not start from zero."""
+
+    officer_name = agent.get("name") or "the assigned officer"
+    summary = call_state.ai_summary or analysis.summary or "your concern"
+    return (
+        f"Hello, I am {officer_name} from Sahayak 1092. "
+        f"I have your {analysis.category} report: {summary}. "
+        "I will continue from here, so you do not need to repeat everything."
+    )
+
+
+def _build_handover_context(
+    *,
+    call_state: CallState,
+    analysis: CallAnalysis,
+    route_result: dict,
+    handover_reason: str,
+) -> dict:
+    agent = route_result["agent"]
+    first_sentence = _build_officer_first_sentence(agent, call_state, analysis)
+    return HandoverContext(
+        call_sid=call_state.call_sid,
+        caller_number=call_state.caller_number,
+        transcript=call_state.transcript,
+        ai_summary=call_state.ai_summary,
+        sentiment=analysis.sentiment,
+        urgency=analysis.urgency,
+        confidence=analysis.confidence,
+        language=analysis.language,
+        dialect=call_state.dialect or analysis.dialect,
+        category=analysis.category,
+        handover_reason=handover_reason,
+        selected_agent=agent,
+        routing_score=route_result.get("score", 0.0),
+        routing_score_breakdown=route_result.get("score_breakdown", {}),
+        ranked_agents=route_result.get("ranked_agents", []),
+        officer_first_sentence=first_sentence,
+    ).as_event_payload()
 
 
 # ──────────────────────────────────────────────
@@ -393,105 +358,229 @@ async def process_caller_input(call_sid: str, text: str, caller_number: str = ""
 
     # Add caller utterance to transcript
     call_state.transcript.append({"role": "caller", "text": text})
+    call_repository.update_call_state(call_state)
+    call_repository.append_call_event(
+        call_sid=call_sid,
+        event_type="utterance_received",
+        payload={"text": text},
+        call_state=call_state,
+    )
 
     # ── Step 1: Analyse ──
+    analysis_started_at = time.perf_counter()
     analysis = await analyse_utterance(text, call_state)
+    analysis_latency_ms = round((time.perf_counter() - analysis_started_at) * 1000, 2)
     call_state.ai_summary = analysis.summary
+    _persist_call(call_state, analysis)
+    call_repository.append_call_event(
+        call_sid=call_sid,
+        event_type="analysis_completed",
+        payload={**analysis.as_event_payload(), "latency_ms": analysis_latency_ms},
+        call_state=call_state,
+        analysis=analysis,
+    )
 
-    # ── Step 2: Check handover conditions ──
-    needs_handover = False
-    handover_reason = None
+    # ── Step 2: Check deterministic handover conditions ──
+    handover_decision = evaluate_handover(
+        analysis=analysis,
+        current_attempt_count=call_state.attempt_count,
+        settings=settings,
+    )
+    call_state.attempt_count += handover_decision.attempt_increment
 
-    # Condition 1: Caller explicitly asks for human
-    if analysis.caller_wants_human:
-        needs_handover = True
-        handover_reason = HandoverReason.CALLER_REQUESTED
-
-    # Condition 2: Extremely high urgency/distress
-    elif analysis.urgency >= 0.9 and analysis.sentiment in ("distressed", "angry"):
-        needs_handover = True
-        handover_reason = HandoverReason.HIGH_URGENCY
-
-    # Condition 3: Low confidence after 2 attempts
-    elif analysis.confidence < 0.5:
-        call_state.attempt_count += 1
-        if call_state.attempt_count >= 2:
-            needs_handover = True
-            handover_reason = HandoverReason.LOW_CONFIDENCE
-
-    if needs_handover:
-        call_state.handover_reason = handover_reason
+    if handover_decision.needs_handover:
+        call_state.handover_reason = handover_decision.reason
+        call_repository.append_call_event(
+            call_sid=call_sid,
+            event_type="handover_requested",
+            payload={
+                "reason": handover_decision.reason.value if handover_decision.reason else None,
+                "explanation": handover_decision.explanation,
+            },
+            call_state=call_state,
+            analysis=analysis,
+        )
         route_result = await route_to_agent(call_state, analysis)
 
         if route_result:
             # Successful match → warm handover
-            call_state.current_phase = "handover"
+            call_state.current_phase = CallPhase.HANDOVER_PENDING.value
             call_state.outcome = CallOutcome.HANDED_OVER
             call_state.agent_id = route_result["agent"]["id"]
+            handover_reason = handover_decision.reason.value if handover_decision.reason else ""
+            handover_context = _build_handover_context(
+                call_state=call_state,
+                analysis=analysis,
+                route_result=route_result,
+                handover_reason=handover_reason,
+            )
+            call_state.handover_context = handover_context
+            call_state.routing_score_breakdown = route_result.get("score_breakdown", {})
+            call_state.officer_first_sentence = handover_context["officer_first_sentence"]
+            call_state.transfer_status = "awaiting_officer_acceptance"
+            call_state.transfer_mode = settings.transfer_mode
             response = await generate_response(call_state, analysis)
             call_state.transcript.append({"role": "sahayak", "text": response})
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="officer_matched",
+                payload={
+                    "agent": route_result["agent"],
+                    "score": route_result.get("score"),
+                    "score_breakdown": route_result.get("score_breakdown"),
+                    "ranked_agents": route_result.get("ranked_agents", []),
+                    "reason": route_result.get("reason"),
+                    "handover_context": handover_context,
+                    "officer_first_sentence": call_state.officer_first_sentence,
+                },
+                call_state=call_state,
+                analysis=analysis,
+            )
 
             # Persist to DB
             _persist_call(call_state, analysis)
 
-            return {
-                "response_text": response,
-                "action": "handover",
-                "agent": route_result["agent"],
-                "call_state": asdict(call_state),
-                "handover_context": {
-                    "transcript": call_state.transcript,
-                    "ai_summary": call_state.ai_summary,
-                    "sentiment": analysis.sentiment,
-                    "urgency": analysis.urgency,
-                    "language": analysis.language,
-                    "category": analysis.category,
-                },
-            }
+            return _decision_result(
+                response,
+                DecisionAction.HANDOVER,
+                call_state,
+                analysis,
+                agent=route_result["agent"],
+                handover_context=handover_context,
+            )
         else:
             # No agent available → queue with IVR
-            call_state.current_phase = "queued"
+            reason = handover_decision.reason.value if handover_decision.reason else ""
+            queue_entry = queue_manager.enqueue_call(call_state, analysis, reason=reason)
+            queue_manager.apply_to_call_state(call_state, queue_entry)
+            call_state.current_phase = CallPhase.QUEUED.value
             call_state.outcome = CallOutcome.QUEUED
-            import time
             call_state.queue_start_time = time.time()
             response = await generate_response(call_state, analysis)
             call_state.transcript.append({"role": "sahayak", "text": response})
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="queued",
+                payload={
+                    "reason": reason,
+                    "queue_start_time": call_state.queue_start_time,
+                    "queue": queue_entry.as_dict(),
+                    "high_help_alert_timeout_sec": queue_manager.queue_timeout_sec(),
+                },
+                call_state=call_state,
+                analysis=analysis,
+            )
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="queue_updated",
+                payload=queue_entry.as_dict(),
+                call_state=call_state,
+                analysis=analysis,
+            )
 
             _persist_call(call_state, analysis)
 
-            return {
-                "response_text": response,
-                "action": "queue",
-                "call_state": asdict(call_state),
-            }
+            return _decision_result(
+                response,
+                DecisionAction.QUEUE,
+                call_state,
+                analysis,
+                reason=reason,
+            )
 
     # ── Step 3: Confirmation Loop (Vachan) ──
-    if call_state.current_phase == "confirming":
+    if _is_vachan_phase(call_state):
+        incoming_vachan_phase = call_state.current_phase
+        confirmation_status = analysis.confirmation_status
         if analysis.is_confirmation is True:
+            confirmation_status = ConfirmationStatus.YES.value
+        elif analysis.is_confirmation is False:
+            confirmation_status = ConfirmationStatus.NO.value
+
+        if confirmation_status == ConfirmationStatus.YES.value:
             # Confirmed! → Resolve
-            call_state.current_phase = "resolved"
+            call_state.current_phase = CallPhase.RESOLVED.value
             call_state.outcome = CallOutcome.AI_RESOLVED
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="vachan_confirmed",
+                payload={
+                    "summary": call_state.ai_summary,
+                    "resolution": call_state.resolution,
+                    "corrections": call_state.vachan_corrections,
+                },
+                call_state=call_state,
+                analysis=analysis,
+            )
 
             # Register complaint
+            final_category = (
+                (call_state.similar_case or {}).get("category")
+                or analysis.category
+                or "general"
+            )
+            complaint = complaint_registry.register_ai_resolved_complaint(
+                call_state=call_state,
+                analysis=analysis,
+                category=final_category,
+                resolution=call_state.resolution,
+            )
+            call_state.complaint_registered = True
+            call_state.complaint_reference_id = complaint.get("reference_id")
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="complaint_registered",
+                payload={
+                    "category": final_category,
+                    "reference_id": complaint.get("reference_id"),
+                    "complaint_id": complaint.get("id"),
+                    "status": complaint.get("status"),
+                    "location": complaint.get("location"),
+                    "government_payload": complaint.get("government_payload"),
+                },
+                call_state=call_state,
+                analysis=analysis,
+            )
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="complaint_timeline_updated",
+                payload={
+                    "reference_id": complaint.get("reference_id"),
+                    "events": ["complaint_registered", "government_payload_created"],
+                },
+                call_state=call_state,
+                analysis=analysis,
+            )
             try:
-                call_log = db.get_call_log(call_sid)
-                if call_log:
-                    db.register_complaint(
-                        call_log_id=call_log["id"],
-                        category=analysis.category or "general",
-                        description=call_state.ai_summary,
-                    )
-                    call_state.complaint_registered = True
+                db.update_call_log(
+                    call_sid=call_sid,
+                    complaint_reference_id=call_state.complaint_reference_id,
+                )
             except Exception:
                 pass
 
             # Add to knowledge base
             try:
+                learned_case = {
+                    "summary": call_state.ai_summary,
+                    "category": final_category,
+                    "language": call_state.language,
+                    "dialect": call_state.dialect,
+                    "urgency_band": urgency_band(analysis.urgency),
+                    "resolution": call_state.resolution,
+                    "tags": [final_category, "ai_resolved"],
+                }
+                embedding = await generate_case_embedding(learned_case)
                 db.insert_resolved_case(
                     summary=call_state.ai_summary,
-                    category=analysis.category or "general",
+                    category=final_category,
                     language=call_state.language,
+                    dialect=call_state.dialect,
+                    urgency_band=learned_case["urgency_band"],
                     resolution=call_state.resolution,
+                    tags=learned_case["tags"],
+                    source_call_sid=call_sid,
+                    embedding=serializable_embedding(embedding),
                 )
             except Exception:
                 pass
@@ -500,73 +589,201 @@ async def process_caller_input(call_sid: str, text: str, caller_number: str = ""
             call_state.transcript.append({"role": "sahayak", "text": response})
             _persist_call(call_state, analysis)
 
-            return {
-                "response_text": response,
-                "action": "resolve",
-                "call_state": asdict(call_state),
-            }
+            return _decision_result(response, DecisionAction.RESOLVE, call_state, analysis)
 
-        elif analysis.is_confirmation is False:
-            # Not confirmed → go back to listening
-            call_state.current_phase = "listening"
+        if confirmation_status == ConfirmationStatus.NO.value:
+            # Not confirmed → ask what was wrong before taking any final action.
+            call_state.current_phase = CallPhase.CLARIFYING.value
             call_state.attempt_count += 1
+            call_state.pending_clarification_fields = analysis.missing_fields or ["description"]
+            call_state.vachan_corrections.append(
+                {
+                    "status": ConfirmationStatus.NO.value,
+                    "text": analysis.correction_text or analysis.raw_text,
+                    "fields": call_state.pending_clarification_fields,
+                }
+            )
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="vachan_rejected",
+                payload={
+                    "text": analysis.correction_text or analysis.raw_text,
+                    "fields": call_state.pending_clarification_fields,
+                },
+                call_state=call_state,
+                analysis=analysis,
+            )
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="vachan_correction_requested",
+                payload={"fields": call_state.pending_clarification_fields},
+                call_state=call_state,
+                analysis=analysis,
+            )
             response = await generate_response(call_state, analysis)
             call_state.transcript.append({"role": "sahayak", "text": response})
-            return {
-                "response_text": response,
-                "action": "continue",
-                "call_state": asdict(call_state),
+            _persist_call(call_state, analysis)
+            return _decision_result(response, DecisionAction.CONTINUE, call_state, analysis)
+
+        if confirmation_status == ConfirmationStatus.PARTIAL.value:
+            correction = {
+                "status": ConfirmationStatus.PARTIAL.value,
+                "text": analysis.correction_text or analysis.raw_text,
+                "fields": analysis.missing_fields or call_state.pending_clarification_fields or ["description"],
             }
+            call_state.vachan_corrections.append(correction)
+            call_state.pending_clarification_fields = correction["fields"]
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="vachan_partial",
+                payload=correction,
+                call_state=call_state,
+                analysis=analysis,
+            )
 
-    # ── Step 4: Smart Similarity Detection ──
-    if analysis.confidence >= 0.6 and call_state.current_phase in ("greeting", "listening"):
-        similar = await find_similar_case(analysis.summary, analysis.category)
-        if similar and similar.get("similarity_score", 0) >= 0.7:
-            call_state.similar_case = similar["matched_case"]
-            call_state.resolution = similar["adapted_resolution"]
-            call_state.current_phase = "confirming"
-            call_state.ai_summary = analysis.summary
+            if incoming_vachan_phase == CallPhase.VACHAN_PARTIAL.value:
+                call_state.ai_summary = _apply_vachan_correction(call_state.ai_summary, correction)
+                call_state.current_phase = CallPhase.VACHAN_PENDING.value
+                call_state.vachan_prompt = _build_vachan_prompt(call_state)
+                response = await generate_response(call_state, analysis, call_state.resolution)
+                call_state.transcript.append({"role": "sahayak", "text": response})
+                call_repository.append_call_event(
+                    call_sid=call_sid,
+                    event_type="vachan_requested",
+                    payload={
+                        "resolution": call_state.resolution,
+                        "source": "partial_correction",
+                        "summary": call_state.ai_summary,
+                    },
+                    call_state=call_state,
+                    analysis=analysis,
+                )
+                _persist_call(call_state, analysis)
+                return _decision_result(response, DecisionAction.CONTINUE, call_state, analysis)
 
-            response = await generate_response(call_state, analysis, similar["adapted_resolution"])
+            call_state.current_phase = CallPhase.VACHAN_PARTIAL.value
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="vachan_correction_requested",
+                payload={"fields": call_state.pending_clarification_fields},
+                call_state=call_state,
+                analysis=analysis,
+            )
+            response = await generate_response(call_state, analysis)
             call_state.transcript.append({"role": "sahayak", "text": response})
             _persist_call(call_state, analysis)
+            return _decision_result(response, DecisionAction.CONTINUE, call_state, analysis)
 
-            return {
-                "response_text": response,
-                "action": "continue",
-                "call_state": asdict(call_state),
-            }
+        call_repository.append_call_event(
+            call_sid=call_sid,
+            event_type="vachan_correction_requested",
+            payload={"fields": ["yes_no_or_correction"], "reason": "confirmation_unclear"},
+            call_state=call_state,
+            analysis=analysis,
+        )
+        response = await generate_response(call_state, analysis, call_state.resolution)
+        call_state.transcript.append({"role": "sahayak", "text": response})
+        _persist_call(call_state, analysis)
+        return _decision_result(response, DecisionAction.CONTINUE, call_state, analysis)
+
+    # ── Step 4: Smart Similarity Detection ──
+    autonomous_input_phases = {
+        CallPhase.GREETING.value,
+        CallPhase.LISTENING.value,
+        CallPhase.COLLECTING_ISSUE.value,
+        CallPhase.CLARIFYING.value,
+    }
+    if analysis.confidence >= 0.6 and call_state.current_phase in autonomous_input_phases:
+        similarity_started_at = time.perf_counter()
+        similar = await find_similar_case(analysis, call_state)
+        similarity_latency_ms = round((time.perf_counter() - similarity_started_at) * 1000, 2)
+        call_repository.append_call_event(
+            call_sid=call_sid,
+            event_type="similarity_search_completed",
+            payload={
+                "latency_ms": similarity_latency_ms,
+                "matched": bool(similar),
+                "retrieval_source": similar.retrieval_source if similar else None,
+                "threshold": settings.similarity_match_threshold,
+            },
+            call_state=call_state,
+            analysis=analysis,
+        )
+        if similar and similar.similarity_score >= settings.similarity_match_threshold:
+            call_state.similar_case = similar.matched_case
+            call_state.matched_case_id = similar.matched_case_id
+            call_state.similarity_score = similar.similarity_score
+            call_state.similarity_source = similar.retrieval_source
+            call_state.adapted_resolution = similar.adapted_resolution
+            call_state.resolution = similar.adapted_resolution
+            call_state.current_phase = CallPhase.VACHAN_PENDING.value
+            call_state.ai_summary = analysis.summary
+            call_state.vachan_prompt = _build_vachan_prompt(call_state)
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="similarity_match_found",
+                payload={**similar.as_event_payload(), "latency_ms": similarity_latency_ms},
+                call_state=call_state,
+                analysis=analysis,
+            )
+
+            response = await generate_response(call_state, analysis, similar.adapted_resolution)
+            call_state.transcript.append({"role": "sahayak", "text": response})
+            call_repository.append_call_event(
+                call_sid=call_sid,
+                event_type="vachan_requested",
+                payload={
+                    "resolution": similar.adapted_resolution,
+                    "source": "similarity",
+                    "matched_case_id": similar.matched_case_id,
+                    "similarity_score": similar.similarity_score,
+                    "similarity_source": similar.retrieval_source,
+                },
+                call_state=call_state,
+                analysis=analysis,
+            )
+            _persist_call(call_state, analysis)
+
+            return _decision_result(
+                response,
+                DecisionAction.CONTINUE,
+                call_state,
+                analysis,
+                similarity=similar,
+            )
 
     # ── Step 5: High confidence → AI takes ownership ──
-    if analysis.confidence >= 0.7 and call_state.current_phase == "listening":
+    if analysis.confidence >= 0.7 and call_state.current_phase in autonomous_input_phases:
         # Generate resolution
         resolution = await _generate_resolution(analysis, call_state)
         call_state.resolution = resolution
-        call_state.current_phase = "confirming"
+        call_state.adapted_resolution = resolution
+        call_state.current_phase = CallPhase.VACHAN_PENDING.value
         call_state.ai_summary = analysis.summary
+        call_state.vachan_prompt = _build_vachan_prompt(call_state)
 
         response = await generate_response(call_state, analysis, resolution)
         call_state.transcript.append({"role": "sahayak", "text": response})
+        call_repository.append_call_event(
+            call_sid=call_sid,
+            event_type="vachan_requested",
+            payload={"resolution": resolution, "source": "generated"},
+            call_state=call_state,
+            analysis=analysis,
+        )
         _persist_call(call_state, analysis)
 
-        return {
-            "response_text": response,
-            "action": "continue",
-            "call_state": asdict(call_state),
-        }
+        return _decision_result(response, DecisionAction.CONTINUE, call_state, analysis)
 
     # ── Step 6: Continue listening ──
-    if call_state.current_phase == "greeting":
-        call_state.current_phase = "listening"
+    if call_state.current_phase in {CallPhase.GREETING.value, CallPhase.COLLECTING_ISSUE.value}:
+        call_state.current_phase = CallPhase.CLARIFYING.value
 
     response = await generate_response(call_state, analysis)
     call_state.transcript.append({"role": "sahayak", "text": response})
+    _persist_call(call_state, analysis)
 
-    return {
-        "response_text": response,
-        "action": "continue",
-        "call_state": asdict(call_state),
-    }
+    return _decision_result(response, DecisionAction.CONTINUE, call_state, analysis)
 
 
 # ──────────────────────────────────────────────
@@ -600,6 +817,29 @@ Keep it concise (3-5 sentences). Respond in {language}.
 Only output the resolution text, no JSON."""
 
 
+def _build_vachan_prompt(call_state: CallState) -> str:
+    """Build the exact understanding Sahayak is asking the citizen to verify."""
+
+    summary = call_state.ai_summary or "your issue"
+    resolution = call_state.resolution or call_state.adapted_resolution or "the next action"
+    return (
+        f"I understood this: {summary}. "
+        f"Sahayak will do this: {resolution}. "
+        "Is this correct? Please say yes, no, or tell me what is wrong."
+    )
+
+
+def _apply_vachan_correction(summary: str, correction: dict) -> str:
+    """Keep corrections visible in state without pretending to fully re-parse them."""
+
+    text = str(correction.get("text") or "").strip()
+    fields = ", ".join(correction.get("fields") or ["description"])
+    if not text:
+        return summary
+    base = summary or "Caller issue"
+    return f"{base} Correction for {fields}: {text}"
+
+
 async def _generate_resolution(analysis: CallAnalysis, call_state: CallState) -> str:
     """Generate a resolution for the caller's issue."""
     messages = [
@@ -614,24 +854,13 @@ async def _generate_resolution(analysis: CallAnalysis, call_state: CallState) ->
             max_tokens=250,
         )
         return resp.choices[0].message.content.strip()
-    except Exception as e:
+    except Exception:
         return f"Your complaint has been registered. Reference: SAH-{call_state.call_sid[-6:].upper()}. An officer will follow up within 30 minutes."
 
 
 def _persist_call(call_state: CallState, analysis: CallAnalysis):
-    """Persist call state to Supabase (fire-and-forget)."""
+    """Persist call state through the repository layer."""
     try:
-        db.update_call_log(
-            call_sid=call_state.call_sid,
-            language=call_state.language,
-            dialect=call_state.dialect,
-            sentiment=analysis.sentiment,
-            urgency=analysis.urgency,
-            confidence=analysis.confidence,
-            transcript=call_state.transcript,
-            ai_summary=call_state.ai_summary,
-            outcome=call_state.outcome.value if call_state.outcome else None,
-            agent_id=call_state.agent_id,
-        )
+        call_repository.update_call_state(call_state, analysis=analysis)
     except Exception as e:
-        print(f"⚠️  DB persist error: {e}")
+        print(f"⚠️  state persist error: {e}")
