@@ -520,26 +520,26 @@ Handle high-volume surge cases safely.
 
 ### Goal
 
-Turn dashboard into a convincing officer command center.
+Turn the dashboard into a convincing officer command center with a modern Next.js UI.
 
 ### Tasks
 
-- [ ] Replace UI-only correction buttons with real API calls.
-- [ ] Add live transcript endpoint usage.
-- [ ] Add AI reasoning panel.
-- [ ] Add Vachan status card.
-- [ ] Add similarity match card.
-- [ ] Add routing score breakdown.
-- [ ] Add queue and High-Help Alert panels.
-- [ ] Add knowledge-base learning event display.
-- [ ] Add backend health and provider health panel.
+- [x] Replace UI-only correction buttons with real API calls.
+- [x] Add live transcript endpoint usage.
+- [x] Add AI reasoning panel.
+- [x] Add Vachan status card.
+- [x] Add similarity match card.
+- [x] Add routing score breakdown.
+- [x] Add queue and High-Help Alert panels.
+- [x] Add knowledge-base learning event display.
+- [x] Add backend health and provider health panel.
 
 ### Acceptance Criteria
 
-- [ ] Officer can correct category, urgency, summary, and resolution.
-- [ ] Corrections are stored as audit events.
-- [ ] Corrected human resolution can be added to knowledge base.
-- [ ] Dashboard supports all five competition demo scenarios.
+- [x] Officer can correct category, urgency, summary, and resolution.
+- [x] Corrections are stored as audit events.
+- [x] Corrected human resolution can be added to knowledge base.
+- [x] Dashboard supports all five competition demo scenarios.
 
 ## Phase 12: Security and Production Hardening
 
@@ -549,22 +549,22 @@ Make the system credible for government/emergency deployment.
 
 ### Tasks
 
-- [ ] Validate Twilio webhook signatures.
-- [ ] Add dashboard authentication.
-- [ ] Add role-based authorization.
-- [ ] Add PII masking for phone numbers and sensitive text.
-- [ ] Add structured JSON logs.
-- [ ] Add rate limiting.
-- [ ] Add request IDs and call correlation IDs.
-- [ ] Add safe error responses.
-- [ ] Add data retention configuration.
+- [x] Validate Twilio webhook signatures.
+- [x] Add dashboard authentication.
+- [x] Add role-based authorization.
+- [x] Add PII masking for phone numbers and sensitive text.
+- [x] Add structured JSON logs.
+- [x] Add rate limiting.
+- [x] Add request IDs and call correlation IDs.
+- [x] Add safe error responses.
+- [x] Add data retention configuration.
 
 ### Acceptance Criteria
 
-- [ ] Public webhooks are validated.
-- [ ] Dashboard cannot mutate data without auth in production mode.
-- [ ] Logs avoid leaking full phone numbers by default.
-- [ ] All API errors return safe JSON.
+- [x] Public webhooks are validated.
+- [x] Dashboard cannot mutate data without auth in production mode.
+- [x] Logs avoid leaking full phone numbers by default.
+- [x] All API errors return safe JSON.
 
 ## Phase 13: End-to-End Demo Scripts
 

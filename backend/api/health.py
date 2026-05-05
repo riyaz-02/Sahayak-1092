@@ -20,6 +20,13 @@ def build_health_payload(
         "version": settings.app_version,
         "environment": settings.environment,
         "active_calls": active_calls,
+        "security": {
+            "twilio_signature_validation": settings.validate_twilio_signatures,
+            "dashboard_auth_required": settings.dashboard_auth_required,
+            "rate_limit_enabled": settings.rate_limit_enabled,
+            "mask_pii_in_logs": settings.mask_pii_in_logs,
+            "data_retention_days": settings.data_retention_days,
+        },
     }
     if persistence is not None:
         payload["persistence"] = persistence

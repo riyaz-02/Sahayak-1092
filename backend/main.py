@@ -20,7 +20,10 @@ Endpoints:
 import os
 import sys
 import datetime as dt
+import time
 from contextlib import asynccontextmanager
+from typing import Any
+from uuid import uuid4
 
 # Fix Windows console encoding for Unicode
 if sys.platform == "win32":
@@ -28,6 +31,7 @@ if sys.platform == "win32":
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from fastapi import FastAPI, Request, WebSocket, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -41,10 +45,24 @@ from backend.decision_engine import (
     get_or_create_call,
     process_caller_input,
 )
-from backend.intelligence.similarity import deterministic_seed_cases
+from backend.intelligence.schemas import CallAnalysis
+from backend.intelligence.similarity import (
+    deterministic_seed_cases,
+    generate_case_embedding,
+    serializable_embedding,
+    urgency_band,
+)
 from backend.persistence.complaints import get_complaint_registry
-from backend.persistence.repository import get_call_repository
+from backend.persistence.repository import get_call_repository, state_to_dict
 from backend.routing.queue_manager import get_queue_manager
+from backend.security import (
+    authorize_dashboard_request,
+    client_ip,
+    json_log,
+    rate_limiter,
+    request_id_from,
+    validate_twilio_request,
+)
 from backend.routing.transfer_service import TransferRequest, get_transfer_service
 from backend import supabase_client as db
 
@@ -54,6 +72,7 @@ call_repository = get_call_repository()
 complaint_registry = get_complaint_registry()
 queue_manager = get_queue_manager()
 transfer_service = get_transfer_service()
+local_learned_cases: list[dict[str, Any]] = []
 
 BASE_URL = settings.base_url
 TWILIO_PHONE_NUMBER = settings.twilio_phone_number
@@ -70,21 +89,23 @@ if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown tasks."""
-    print("=" * 60)
-    print("[START] Sahayak 1092 - Starting up...")
-    print(f"   Base URL : {BASE_URL}")
-    print(f"   Twilio # : {TWILIO_PHONE_NUMBER}")
-    print("=" * 60)
+    json_log(
+        "app_start",
+        base_url=BASE_URL,
+        twilio_phone_number=TWILIO_PHONE_NUMBER,
+        environment=settings.environment,
+        demo_mode=settings.demo_mode,
+    )
 
     # Seed demo data
     try:
         await db.seed_demo_data()
-    except Exception as e:
-        print(f"[WARN] Seed error (non-fatal): {e}")
+    except Exception as exc:
+        json_log("seed_skipped", error=str(exc))
 
     yield  # app running
 
-    print("[STOP] Sahayak 1092 - Shutting down...")
+    json_log("app_stop")
 
 
 # ── App ──────────────────────────────────────
@@ -104,6 +125,136 @@ app.add_middleware(
 )
 
 
+def _safe_error_response(
+    request: Request,
+    *,
+    status_code: int,
+    code: str,
+    detail: str,
+) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", request_id_from(request, settings))
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "code": code,
+                "message": detail,
+                "request_id": request_id,
+            }
+        },
+        headers={settings.request_id_header: request_id},
+    )
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    """Attach request IDs, rate-limit, authenticate dashboard APIs, and log safely."""
+
+    started_at = time.perf_counter()
+    request_id = request_id_from(request, settings)
+    request.state.request_id = request_id
+    path = request.url.path
+    method = request.method.upper()
+    auth_decision = authorize_dashboard_request(request, settings)
+    if not auth_decision.allowed:
+        json_log(
+            "auth_rejected",
+            request_id=request_id,
+            method=method,
+            path=path,
+            role=auth_decision.role,
+            client_ip=client_ip(request),
+        )
+        return _safe_error_response(
+            request,
+            status_code=auth_decision.status_code,
+            code="forbidden" if auth_decision.status_code == 403 else "unauthorized",
+            detail=auth_decision.detail,
+        )
+
+    if settings.rate_limit_enabled:
+        limit = (
+            settings.rate_limit_per_minute
+            if method in {"GET", "HEAD", "OPTIONS"}
+            else settings.mutation_rate_limit_per_minute
+        )
+        allowed, remaining = rate_limiter.check(
+            f"{client_ip(request)}:{method}:{path}",
+            limit=limit,
+        )
+        if not allowed:
+            json_log(
+                "rate_limited",
+                request_id=request_id,
+                method=method,
+                path=path,
+                role=auth_decision.role,
+                client_ip=client_ip(request),
+            )
+            return _safe_error_response(
+                request,
+                status_code=429,
+                code="rate_limited",
+                detail="Too many requests. Please retry shortly.",
+            )
+    else:
+        remaining = -1
+
+    response = await call_next(request)
+    duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    response.headers[settings.request_id_header] = request_id
+    if remaining >= 0:
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
+    json_log(
+        "http_request",
+        request_id=request_id,
+        method=method,
+        path=path,
+        status_code=response.status_code,
+        role=auth_decision.role,
+        client_ip=client_ip(request),
+        duration_ms=duration_ms,
+    )
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def safe_http_exception_handler(request: Request, exc: HTTPException):
+    detail = str(exc.detail) if exc.detail else "Request failed"
+    return _safe_error_response(
+        request,
+        status_code=exc.status_code,
+        code="http_error",
+        detail=detail,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def safe_validation_exception_handler(request: Request, exc: RequestValidationError):
+    return _safe_error_response(
+        request,
+        status_code=422,
+        code="validation_error",
+        detail="Invalid request payload",
+    )
+
+
+@app.exception_handler(Exception)
+async def safe_unhandled_exception_handler(request: Request, exc: Exception):
+    json_log(
+        "unhandled_exception",
+        request_id=getattr(request.state, "request_id", ""),
+        path=request.url.path,
+        error=str(exc),
+    )
+    return _safe_error_response(
+        request,
+        status_code=500,
+        code="internal_error",
+        detail="Internal server error",
+    )
+
+
 # ──────────────────────────────────────────────
 # TWILIO WEBHOOK: INCOMING CALL
 # ──────────────────────────────────────────────
@@ -114,18 +265,22 @@ async def twilio_incoming(request: Request):
     Twilio calls this when someone dials the 1092 number.
     We answer instantly and start a bidirectional Media Stream.
     """
+    form = await request.form()
+    if not validate_twilio_request(request, form, settings):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
     try:
-        form = await request.form()
         call_sid = form.get("CallSid", "unknown")
         caller = form.get("From", "unknown")
         called = form.get("To", TWILIO_PHONE_NUMBER)
 
-        print(f"\n{'='*60}")
-        print("[CALL] INCOMING CALL")
-        print(f"   From     : {caller}")
-        print(f"   To       : {called}")
-        print(f"   CallSid  : {call_sid}")
-        print(f"{'='*60}\n")
+        json_log(
+            "incoming_call",
+            request_id=getattr(request.state, "request_id", ""),
+            caller_number=caller,
+            called_number=called,
+            call_sid=call_sid,
+        )
 
         # Build TwiML — Connect to bidirectional Media Stream
         response = VoiceResponse()
@@ -142,11 +297,19 @@ async def twilio_incoming(request: Request):
         response.hangup()
 
         twiml = str(response)
-        print(f"[TWIML] {twiml[:200]}")
+        json_log(
+            "twiml_generated",
+            request_id=getattr(request.state, "request_id", ""),
+            call_sid=call_sid,
+        )
         return Response(content=twiml, media_type="application/xml")
 
-    except Exception as e:
-        print(f"[ERROR] twilio_incoming failed: {e}")
+    except Exception as exc:
+        json_log(
+            "incoming_call_failed",
+            request_id=getattr(request.state, "request_id", ""),
+            error=str(exc),
+        )
         # Return minimal valid TwiML so Twilio doesn't play its own error
         fallback = VoiceResponse()
         fallback.say("Sahayak 1092. Please hold.", voice="Polly.Aditi", language="en-IN")
@@ -162,11 +325,19 @@ async def twilio_incoming(request: Request):
 async def twilio_status(request: Request):
     """Track call status changes (ringing, in-progress, completed, etc.)."""
     form = await request.form()
+    if not validate_twilio_request(request, form, settings):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
     call_sid = form.get("CallSid", "unknown")
     status = form.get("CallStatus", "unknown")
     duration = form.get("CallDuration", "0")
 
-    print(f"[STATUS] Call status: {call_sid[-8:]} -> {status} (duration: {duration}s)")
+    json_log(
+        "call_status",
+        request_id=getattr(request.state, "request_id", ""),
+        call_sid=call_sid,
+        status=status,
+        duration=duration,
+    )
 
     if status in ("completed", "busy", "failed", "no-answer"):
         # Clean up call state
@@ -220,7 +391,12 @@ async def call_me(request: Request):
             status_callback_event=["initiated", "ringing", "answered", "completed"],
             status_callback_method="POST",
         )
-        print(f"[OUTBOUND] Calling {phone} -> Call SID: {call.sid}")
+        json_log(
+            "outbound_call_started",
+            request_id=getattr(request.state, "request_id", ""),
+            phone=phone,
+            call_sid=call.sid,
+        )
         return JSONResponse({
             "status": "calling",
             "message": f"Sahayak is calling {phone} now. Please pick up!",
@@ -228,9 +404,14 @@ async def call_me(request: Request):
             "to": phone,
             "from": TWILIO_PHONE_NUMBER,
         })
-    except Exception as e:
-        print(f"[ERROR] Outbound call failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Call failed: {str(e)}")
+    except Exception as exc:
+        json_log(
+            "outbound_call_failed",
+            request_id=getattr(request.state, "request_id", ""),
+            phone=phone,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail="Call failed")
 
 
 # ──────────────────────────────────────────────
@@ -313,8 +494,8 @@ async def api_call_logs():
     try:
         logs = call_repository.fetch_recent_calls(limit=50)
         return JSONResponse({"call_logs": logs, "count": len(logs)})
-    except Exception as e:
-        return JSONResponse({"call_logs": [], "count": 0, "error": str(e)})
+    except Exception:
+        return JSONResponse({"call_logs": [], "count": 0, "error": "call_logs_unavailable"})
 
 
 @app.get("/api/agents")
@@ -323,8 +504,8 @@ async def api_agents():
     try:
         agents = db.get_all_agents()
         return JSONResponse({"agents": agents, "count": len(agents)})
-    except Exception as e:
-        return JSONResponse({"agents": [], "count": 0, "error": str(e)})
+    except Exception:
+        return JSONResponse({"agents": [], "count": 0, "error": "agents_unavailable"})
 
 
 @app.post("/api/agent/toggle")
@@ -339,6 +520,197 @@ async def api_toggle_agent(request: Request):
 
     result = db.update_agent_availability(agent_id, available)
     return JSONResponse({"status": "ok", "agent": result})
+
+
+def _latest_analysis_payload(call_state) -> dict[str, Any]:
+    if call_state.analyses:
+        return dict(call_state.analyses[-1])
+    return {}
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _case_for_response(case: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in case.items() if key != "embedding"}
+
+
+@app.post("/api/calls/{call_sid}/corrections")
+async def api_apply_call_corrections(call_sid: str, request: Request):
+    """Apply officer corrections to AI output and store an audit event."""
+    body = await request.json()
+    call_state = call_repository.get_call_state(call_sid)
+    if not call_state:
+        raise HTTPException(status_code=404, detail="Call not found")
+
+    latest = _latest_analysis_payload(call_state)
+    previous = {
+        "category": latest.get("category"),
+        "urgency": latest.get("urgency"),
+        "summary": call_state.ai_summary,
+        "resolution": call_state.resolution,
+    }
+    category = str(body.get("category") or latest.get("category") or "general").strip()
+    urgency = _optional_float(body.get("urgency"))
+    if urgency is None:
+        urgency = _optional_float(latest.get("urgency")) or 0.5
+    summary = str(body.get("summary") or call_state.ai_summary or latest.get("summary") or "").strip()
+    resolution = str(body.get("resolution") or call_state.resolution or "").strip()
+    notes = str(body.get("notes") or "").strip()
+    corrected_by = str(body.get("corrected_by") or body.get("agent_id") or "").strip()
+
+    corrected_analysis = CallAnalysis(
+        language=call_state.language or latest.get("language") or "english",
+        dialect=call_state.dialect or latest.get("dialect") or "",
+        sentiment=latest.get("sentiment") or "calm",
+        urgency=urgency,
+        confidence=_optional_float(latest.get("confidence")) or 0.9,
+        category=category,
+        summary=summary,
+        raw_text=latest.get("raw_text") or "",
+    )
+    call_state.language = corrected_analysis.language
+    call_state.dialect = corrected_analysis.dialect
+    call_state.ai_summary = summary
+    call_state.resolution = resolution
+    if call_state.analyses:
+        call_state.analyses[-1] = corrected_analysis.as_event_payload()
+    else:
+        call_state.analyses.append(corrected_analysis.as_event_payload())
+
+    call_repository.update_call_state(call_state, analysis=corrected_analysis)
+    event = call_repository.append_call_event(
+        call_sid=call_sid,
+        event_type="ai_correction_applied",
+        payload={
+            "previous": previous,
+            "corrected": {
+                "category": corrected_analysis.category,
+                "urgency": corrected_analysis.urgency,
+                "summary": summary,
+                "resolution": resolution,
+            },
+            "notes": notes,
+            "corrected_by": corrected_by,
+        },
+        call_state=call_state,
+        analysis=corrected_analysis,
+    )
+    return JSONResponse(
+        {
+            "status": "ok",
+            "call_sid": call_sid,
+            "call_state": state_to_dict(call_state),
+            "event": event,
+        }
+    )
+
+
+@app.post("/api/resolved-cases/from-call")
+async def api_add_resolved_case_from_call(request: Request):
+    """Add a corrected human resolution to the Smart Similarity knowledge base."""
+    body = await request.json()
+    call_sid = str(body.get("call_sid") or "").strip()
+    call_state = call_repository.get_call_state(call_sid) if call_sid else None
+    latest = _latest_analysis_payload(call_state) if call_state else {}
+
+    summary = str(
+        body.get("summary")
+        or (call_state.ai_summary if call_state else "")
+        or latest.get("summary")
+        or ""
+    ).strip()
+    resolution = str(
+        body.get("resolution")
+        or (call_state.resolution if call_state else "")
+        or (call_state.adapted_resolution if call_state else "")
+        or ""
+    ).strip()
+    if not summary or not resolution:
+        raise HTTPException(status_code=400, detail="summary and resolution are required")
+
+    urgency = _optional_float(body.get("urgency"))
+    if urgency is None:
+        urgency = _optional_float(latest.get("urgency")) or 0.5
+    category = str(body.get("category") or latest.get("category") or "general").strip()
+    language = str(
+        body.get("language")
+        or (call_state.language if call_state else "")
+        or latest.get("language")
+        or "english"
+    ).strip()
+    dialect = str(
+        body.get("dialect")
+        or (call_state.dialect if call_state else "")
+        or latest.get("dialect")
+        or ""
+    ).strip()
+    tags = body.get("tags") or [category, language, urgency_band(urgency)]
+    if isinstance(tags, str):
+        tags = [item.strip() for item in tags.split(",") if item.strip()]
+
+    case = {
+        "summary": summary,
+        "category": category,
+        "language": language,
+        "dialect": dialect,
+        "urgency_band": str(body.get("urgency_band") or urgency_band(urgency)),
+        "resolution": resolution,
+        "tags": tags,
+        "source_call_sid": call_sid or None,
+    }
+    embedding = serializable_embedding(await generate_case_embedding(case))
+    inserted = {}
+    source = "local_fallback"
+    if settings.supabase_configured:
+        try:
+            inserted = db.insert_resolved_case(**case, embedding=embedding)
+            if inserted:
+                source = "supabase"
+        except Exception:
+            inserted = {}
+
+    if not inserted:
+        inserted = {
+            "id": f"local-learned-{uuid4()}",
+            **case,
+            "created_at": dt.datetime.now(dt.UTC).isoformat(),
+        }
+        local_learned_cases.insert(0, {**inserted, "embedding": embedding})
+
+    analysis = CallAnalysis(
+        language=language,
+        dialect=dialect,
+        category=category,
+        urgency=urgency,
+        confidence=_optional_float(latest.get("confidence")) or 0.9,
+        summary=summary,
+    )
+    event = call_repository.append_call_event(
+        call_sid=call_sid or str(inserted.get("id")),
+        event_type="knowledge_base_case_added",
+        payload={
+            "case": _case_for_response(inserted),
+            "source": source,
+            "tags": tags,
+        },
+        call_state=call_state,
+        analysis=analysis,
+    )
+    return JSONResponse(
+        {
+            "status": "ok",
+            "source": source,
+            "case": _case_for_response(inserted),
+            "event": event,
+        }
+    )
 
 
 def _agent_from_context_or_db(agent_id: str, handover_context: dict) -> dict | None:
@@ -439,8 +811,8 @@ async def api_complaints(call_sid: str | None = None):
     try:
         complaints = complaint_registry.list_complaints(limit=50, call_sid=call_sid)
         return JSONResponse({"complaints": complaints, "count": len(complaints)})
-    except Exception as e:
-        return JSONResponse({"complaints": [], "count": 0, "error": str(e)})
+    except Exception:
+        return JSONResponse({"complaints": [], "count": 0, "error": "complaints_unavailable"})
 
 
 @app.get("/api/complaints/{reference_id}/timeline")
@@ -468,15 +840,21 @@ async def api_resolved_cases():
                 {key: value for key, value in case.items() if key != "embedding"}
                 for case in deterministic_seed_cases()
             ]
+        if local_learned_cases:
+            learned = [_case_for_response(case) for case in local_learned_cases]
+            cases = learned + cases
         return JSONResponse({"cases": cases, "count": len(cases)})
-    except Exception as e:
+    except Exception:
         if settings.demo_mode:
             cases = [
                 {key: value for key, value in case.items() if key != "embedding"}
                 for case in deterministic_seed_cases()
             ]
+            if local_learned_cases:
+                learned = [_case_for_response(case) for case in local_learned_cases]
+                cases = learned + cases
             return JSONResponse({"cases": cases, "count": len(cases), "fallback": "demo_seed"})
-        return JSONResponse({"cases": [], "count": 0, "error": str(e)})
+        return JSONResponse({"cases": [], "count": 0, "error": "resolved_cases_unavailable"})
 
 
 @app.get("/api/call-transcript/{call_sid}")

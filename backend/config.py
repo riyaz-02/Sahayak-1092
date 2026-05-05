@@ -95,6 +95,18 @@ class Settings:
     supabase_key: str = ""
     redis_url: str = ""
 
+    validate_twilio_signatures: bool = False
+    dashboard_auth_required: bool = False
+    dashboard_api_key: str = ""
+    dashboard_admin_key: str = ""
+    dashboard_readonly_key: str = ""
+    rate_limit_enabled: bool = True
+    rate_limit_per_minute: int = 180
+    mutation_rate_limit_per_minute: int = 60
+    request_id_header: str = "X-Request-ID"
+    mask_pii_in_logs: bool = True
+    data_retention_days: int = 180
+
     low_confidence_threshold: float = 0.5
     low_confidence_max_attempts: int = 2
     autonomous_confidence_threshold: float = 0.7
@@ -128,10 +140,11 @@ class Settings:
 def get_settings() -> Settings:
     """Return cached settings from the current process environment."""
 
+    demo_mode = _as_bool(os.getenv("DEMO_MODE"), True)
     return Settings(
         environment=os.getenv("SAHAYAK_ENV", os.getenv("ENVIRONMENT", "development")),
         debug=_as_bool(os.getenv("DEBUG"), False),
-        demo_mode=_as_bool(os.getenv("DEMO_MODE"), True),
+        demo_mode=demo_mode,
         host=os.getenv("HOST", "0.0.0.0"),
         port=_as_int(os.getenv("PORT"), 8000),
         base_url=os.getenv("BASE_URL", "http://localhost:8000"),
@@ -173,6 +186,26 @@ def get_settings() -> Settings:
         supabase_url=os.getenv("SUPABASE_URL", ""),
         supabase_key=os.getenv("SUPABASE_KEY", ""),
         redis_url=os.getenv("REDIS_URL", ""),
+        validate_twilio_signatures=_as_bool(
+            os.getenv("VALIDATE_TWILIO_SIGNATURES"),
+            not demo_mode,
+        ),
+        dashboard_auth_required=_as_bool(
+            os.getenv("DASHBOARD_AUTH_REQUIRED"),
+            not demo_mode,
+        ),
+        dashboard_api_key=os.getenv("DASHBOARD_API_KEY", ""),
+        dashboard_admin_key=os.getenv("DASHBOARD_ADMIN_KEY", ""),
+        dashboard_readonly_key=os.getenv("DASHBOARD_READONLY_KEY", ""),
+        rate_limit_enabled=_as_bool(os.getenv("RATE_LIMIT_ENABLED"), True),
+        rate_limit_per_minute=_as_int(os.getenv("RATE_LIMIT_PER_MINUTE"), 180),
+        mutation_rate_limit_per_minute=_as_int(
+            os.getenv("MUTATION_RATE_LIMIT_PER_MINUTE"),
+            60,
+        ),
+        request_id_header=os.getenv("REQUEST_ID_HEADER", "X-Request-ID"),
+        mask_pii_in_logs=_as_bool(os.getenv("MASK_PII_IN_LOGS"), True),
+        data_retention_days=_as_int(os.getenv("DATA_RETENTION_DAYS"), 180),
         low_confidence_threshold=_as_float(os.getenv("LOW_CONFIDENCE_THRESHOLD"), 0.5),
         low_confidence_max_attempts=_as_int(os.getenv("LOW_CONFIDENCE_MAX_ATTEMPTS"), 2),
         autonomous_confidence_threshold=_as_float(os.getenv("AUTONOMOUS_CONFIDENCE_THRESHOLD"), 0.7),

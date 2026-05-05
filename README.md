@@ -2,242 +2,259 @@
 
 **Every Voice Heard. Every Call Resolved. Every Second Counts.**
 
-Sahayak 1092 is an AI-first voice-to-voice helpline system for India's 1092 emergency support flow. It answers a citizen immediately, understands their language, dialect, intent, emotion, and urgency, resolves high-confidence calls autonomously, and hands over only true exceptions to the best available officer with full context.
+Sahayak 1092 is an AI-first voice-to-voice helpline platform for the 1092 emergency support flow. It answers immediately, understands the caller's language and situation, resolves routine high-confidence calls end-to-end, and transfers only true exception cases to the best available officer with full context.
 
-The goal is simple: reduce caller wait time, reduce repeated explanations, protect frontline officers from routine overload, and keep the human team focused on cases where human judgement matters most.
+The system is built for Indian public-service conditions: multilingual callers, dialect variation, emotional speech, high-volume surges, limited officer capacity, and the need for auditable decisions.
 
-## Table of Contents
+## Contents
 
-- [Problem](#problem)
-- [Solution](#solution)
-- [Key Capabilities](#key-capabilities)
+- [Why This Exists](#why-this-exists)
+- [What Sahayak Does](#what-sahayak-does)
+- [Core Call Flow](#core-call-flow)
 - [Architecture](#architecture)
 - [Repository Structure](#repository-structure)
-- [Setup](#setup)
-- [Environment Variables](#environment-variables)
+- [Tech Stack](#tech-stack)
+- [Quick Start](#quick-start)
+- [Environment Setup](#environment-setup)
 - [Supabase and Vector DB](#supabase-and-vector-db)
-- [Run Locally](#run-locally)
+- [Run the App](#run-the-app)
 - [Testing](#testing)
+- [Live Twilio Call Setup](#live-twilio-call-setup)
+- [Dashboard](#dashboard)
 - [API Reference](#api-reference)
-- [Demo Guide](#demo-guide)
-- [Production Notes](#production-notes)
+- [Production Deployment](#production-deployment)
+- [Demo Script](#demo-script)
+- [Security Notes](#security-notes)
 
-## Problem
+## Why This Exists
 
-When someone dials 1092, they usually need fast, accurate help. In the current human-first support pattern, even routine calls often go straight to an officer. That creates three serious problems:
+When a citizen calls 1092, they need help quickly. In many current helpline flows, almost every call reaches a human officer directly, even if the issue is routine or already handled many times before. That creates four problems:
 
-- Citizens wait during urgent moments.
-- Callers may need to repeat details because of language, dialect, or emotional mismatch.
-- Officers spend time on repetitive cases instead of complex or high-distress cases.
+- Long waits during stressful or urgent moments.
+- Repeated explanations from citizens.
+- Language, dialect, and emotion mismatch between caller and officer.
+- Officer overload from repetitive cases.
 
-Sahayak 1092 changes the default from human-first to AI-first, while still keeping human handover ready for genuine exceptions.
+Sahayak changes the default operating model from **human-first** to **AI-first with human safety rails**.
 
-## Solution
+The goal is not to replace officers. The goal is to protect their attention for cases where human judgement matters most.
 
-Sahayak takes control from the first second of the call.
+## What Sahayak Does
 
-1. Citizen calls 1092.
-2. Sahayak answers instantly in the detected language.
-3. The caller speaks naturally.
-4. Sahayak analyzes language, dialect, sentiment, urgency, intent, and confidence.
-5. For high-confidence routine issues, Sahayak resolves the call end-to-end.
-6. Before final action, Sahayak runs the Vachan confirmation loop so the citizen confirms the understanding.
-7. If the case needs a human, Sahayak routes to the best available officer by urgency, language/dialect fit, and wait time.
-8. During surge conditions, Sahayak places the caller in a priority queue, offers DTMF emergency redirects, and triggers a High-Help Alert if the caller becomes unresponsive.
-
-## Key Capabilities
-
-| Capability | What it does |
+| Capability | Description |
 |---|---|
-| AI-first call ownership | Resolves most high-confidence calls without default human transfer. |
-| Multilingual analysis | Supports deterministic local analysis and provider-backed LLM analysis. |
-| Smart Similarity Detection | Matches new issues against previously resolved cases using local embeddings or Supabase pgvector. |
-| Vachan confirmation | Restates Sahayak's understanding and asks for yes/no/partial confirmation before final action. |
-| Complaint registry | Creates structured complaint/action records with readable reference IDs. |
-| Warm officer handover | Sends transcript, AI summary, sentiment, urgency, routing score, and first-sentence guidance to the officer. |
-| Urgency-first routing | Scores officers using urgency/specialty, language/dialect fit, and wait/load signals. |
-| Surge queue | Handles no-agent scenarios with priority queue position and estimated wait. |
-| DTMF redirect | Supports "1 Police, 2 Ambulance, 3 Fire" while waiting in queue. |
-| High-Help Alert | Auto-flags queued callers after timeout and routes toward police assistance. |
-| Audit trail | Stores call events for analysis, similarity, Vachan, complaint, handover, queue, voice, and latency milestones. |
-| Local demo mode | Runs without paid provider keys using deterministic fallbacks and local in-memory storage. |
+| Instant AI call ownership | Sahayak answers from the first second instead of waiting for a human queue. |
+| Multilingual understanding | Detects and handles Kannada, Hindi, English, and dialect signals through a provider cascade and deterministic fallbacks. |
+| Emotion and urgency analysis | Classifies sentiment, distress, urgency, category, intent, and confidence. |
+| Smart Similarity Detection | Matches new calls with previously resolved officer-handled cases using embeddings and vector search. |
+| Vachan confirmation loop | Restates the understood issue and asks for yes/no/partial confirmation before action. |
+| Autonomous complaint registration | Creates structured complaint/action records for high-confidence confirmed calls. |
+| Human exception handover | Transfers low-confidence, human-requested, or extreme-distress calls to officers. |
+| Urgency-first routing | Scores officers by urgency priority, language/dialect fit, and wait/load signals. |
+| Warm transfer | Sends transcript, AI summary, sentiment, urgency, and one-click correction context to the officer. |
+| Surge queue | Queues callers when officers are unavailable, keeps priority order, and shows estimated wait. |
+| DTMF emergency redirect | Lets waiting callers press 1 for Police, 2 for Ambulance, 3 for Fire Services. |
+| High-Help Alert | If a queued caller becomes unresponsive beyond the configured timeout, Sahayak escalates toward police assistance. |
+| Officer dashboard | Next.js command center for live calls, handovers, queue, complaints, and resolved-case learning. |
+| Auditability | Stores call events, decisions, transcripts, corrections, queue events, and complaint timelines. |
+
+## Core Call Flow
+
+```mermaid
+sequenceDiagram
+    participant Citizen
+    participant Telephony as Twilio/Exotel/SIP
+    participant Voice as Voice Pipeline
+    participant AI as Decision Engine
+    participant DB as Supabase + Vector DB
+    participant Officer as Officer Dashboard
+
+    Citizen->>Telephony: Calls 1092
+    Telephony->>Voice: Streams audio
+    Voice->>AI: Transcript chunks
+    AI->>AI: Detect language, dialect, emotion, urgency, confidence
+    AI->>DB: Search similar resolved cases
+    AI->>Citizen: Vachan confirmation
+
+    alt High confidence + confirmed
+        AI->>DB: Register complaint/action
+        AI->>Citizen: Confirm reference and next steps
+    else True exception
+        AI->>Officer: Warm handover with full context
+        Officer->>Citizen: Joins prepared
+    else No officer available
+        AI->>DB: Create priority queue entry
+        AI->>Citizen: Continue support, DTMF options, High-Help Alert
+    end
+```
 
 ## Architecture
 
-### System Architecture
-
-This is the main production shape of Sahayak 1092. Telephony, AI processing, routing, persistence, dashboard, and human handover are separated so the system can be tested locally and scaled in production.
+Sahayak is split into telephony, voice, intelligence, decisioning, routing, persistence, security, and dashboard layers. This keeps the project easy to run locally while still matching a production deployment shape.
 
 ```mermaid
 flowchart LR
-    Citizen["Citizen Phone Call"] --> Telephony["Telephony Bridge<br/>Twilio / Exotel / SIP"]
-    Telephony --> Media["Media Stream WebSocket<br/>backend.media_stream"]
+    Citizen["Citizen Phone Call"] --> Bridge["Telephony Bridge<br/>Twilio / Exotel / SIP"]
+    Bridge --> Media["Media Stream WebSocket<br/>backend.media_stream"]
 
-    Media --> STT["STT Provider Cascade<br/>Bhashini / Deepgram / Google / Whisper"]
+    Media --> STT["Streaming STT Cascade<br/>Bhashini / Deepgram / Google / Whisper"]
     STT --> Engine["Decision Engine<br/>backend.decision_engine"]
 
-    Engine --> Analyzer["Language, Dialect, Sentiment,<br/>Urgency, Intent, Confidence"]
-    Engine --> Similarity["Smart Similarity<br/>Resolved Case Retrieval"]
-    Engine --> Vachan["Vachan Confirmation Loop"]
-    Engine --> Registry["Complaint / Action Registry"]
-    Engine --> Routing["Officer Router"]
-    Engine --> Queue["Priority Queue<br/>Surge IVR + High-Help Alert"]
+    Engine --> Analyzer["Language, Dialect,<br/>Sentiment, Urgency, Intent"]
+    Engine --> Rules["Safety Rules<br/>handover policy"]
+    Engine --> Similarity["Smart Similarity<br/>case retrieval"]
+    Engine --> Vachan["Vachan Confirmation"]
+    Engine --> Registry["Complaint Registry"]
+    Engine --> Router["Officer Router"]
+    Engine --> Queue["Surge Queue<br/>DTMF + High-Help Alert"]
 
     Similarity --> VectorDB["Supabase pgvector<br/>resolved_cases.embedding"]
-    Registry --> Supabase["Supabase Postgres<br/>logs, events, complaints"]
+    Registry --> Supabase["Supabase Postgres<br/>call logs, events, complaints"]
     Queue --> Supabase
-    Routing --> Agents["Officer Availability<br/>agents table"]
+    Router --> Agents["Officer availability<br/>agents table"]
 
-    Routing --> Transfer["Warm Transfer Service<br/>Mock or Twilio"]
+    Router --> Transfer["Transfer Service<br/>mock / Twilio"]
     Queue --> Transfer
-    Transfer --> Officer["Human Officer Dashboard"]
+    Transfer --> Officer["Human Officer"]
 
-    Engine --> TTS["TTS Provider Cascade<br/>Bhashini / Google / Edge / OpenAI"]
+    Engine --> TTS["TTS Cascade<br/>Bhashini / Google / Edge / OpenAI"]
     TTS --> Media
     Media --> Citizen
 
-    Dashboard["Streamlit Command Center"] --> API["FastAPI REST API"]
+    Dashboard["Next.js Dashboard"] --> Proxy["Next.js API Proxy<br/>/api/sahayak/*"]
+    Proxy --> API["FastAPI Backend"]
     API --> Supabase
     API --> Engine
 ```
 
-### AI Decision Architecture
+### Decision Architecture
 
-The decision engine uses deterministic safety rules before autonomous action. It does not blindly let an LLM decide emergency handover.
+Sahayak uses a rule-based plus ML/LLM hybrid design. Safety decisions are not left only to a generative model.
 
 ```mermaid
 flowchart TD
     Input["Caller utterance"] --> Analyze["Structured analysis"]
     Analyze --> Safety{"Exception condition?"}
 
-    Safety -->|Low confidence after retries| Handover["Human handover path"]
-    Safety -->|Caller asks for officer| Handover
-    Safety -->|Extreme urgency or distress| Handover
+    Safety -->|"Low confidence after retries"| Handover["Human handover"]
+    Safety -->|"Caller asks for officer"| Handover
+    Safety -->|"Extreme urgency / distress"| Handover
 
-    Safety -->|No exception| Similar["Smart Similarity lookup"]
-    Similar --> Vachan["Restate understanding<br/>yes / no / partial"]
+    Safety -->|"No exception"| Similar["Resolved-case similarity search"]
+    Similar --> Vachan["Vachan confirmation"]
 
-    Vachan -->|Yes| Action["Register complaint or action"]
-    Vachan -->|No| Clarify["Ask clarifying question"]
-    Vachan -->|Partial| Correct["Update summary and reconfirm"]
+    Vachan -->|"Yes"| Register["Register complaint/action"]
+    Vachan -->|"No"| Clarify["Ask clarifying question"]
+    Vachan -->|"Partial"| Correct["Apply correction and reconfirm"]
 
     Handover --> Agent{"Officer available?"}
-    Agent -->|Yes| Warm["Warm transfer with context"]
-    Agent -->|No| Queue["Priority queue"]
+    Agent -->|"Yes"| Warm["Warm transfer with transcript + summary"]
+    Agent -->|"No"| Queue["Priority queue"]
 
-    Queue --> DTMF{"Caller DTMF?"}
-    DTMF -->|1| Police["Police redirect"]
-    DTMF -->|2| Ambulance["Ambulance redirect"]
-    DTMF -->|3| Fire["Fire redirect"]
-    DTMF -->|No response after timeout| Alert["High-Help Alert"]
+    Queue --> DTMF{"DTMF response?"}
+    DTMF -->|"1"| Police["Police redirect"]
+    DTMF -->|"2"| Ambulance["Ambulance redirect"]
+    DTMF -->|"3"| Fire["Fire redirect"]
+    DTMF -->|"No response beyond timeout"| Alert["High-Help Alert"]
 ```
 
 ### Data Architecture
 
-Supabase is the durable system of record. Local development can run without it, but production persistence and vector search need it.
-
 ```mermaid
 erDiagram
-    agents ||--o{ call_logs : "handles"
-    resolved_cases ||--o{ call_logs : "matched_by"
-    call_logs ||--o{ call_events : "records"
-    call_logs ||--o{ complaints : "creates"
-    complaints ||--o{ complaint_timeline : "tracks"
-    call_logs ||--o{ call_queue : "queued_as"
+    agents ||--o{ call_logs : handles
+    resolved_cases ||--o{ call_logs : matches
+    call_logs ||--o{ call_events : records
+    call_logs ||--o{ complaints : creates
+    complaints ||--o{ complaint_timeline : tracks
+    call_logs ||--o{ call_queue : queues
 
     agents {
-        string id
-        string name
-        string badge_id
-        string phone
-        string languages
-        string specialties
+        uuid id
+        text name
+        text badge_id
+        text phone
+        text_array languages
+        text_array specialties
         boolean is_available
         int current_load
         int avg_wait_sec
     }
 
     resolved_cases {
-        string id
-        string summary
-        string category
-        string language
-        string dialect
+        uuid id
+        text summary
+        text category
+        text language
+        text dialect
+        text urgency_band
         vector embedding
-        string resolution
-        string tags
+        text resolution
+        text_array tags
     }
 
     call_logs {
-        string id
-        string call_sid
-        string caller_number
-        json transcript
-        string ai_summary
-        string outcome
+        uuid id
+        text call_sid
+        text caller_number
+        jsonb transcript
+        text ai_summary
+        text outcome
         float urgency
         float confidence
     }
 
     call_events {
-        string id
-        string call_sid
-        string event_type
-        json payload
-        string phase
+        uuid id
+        text call_sid
+        text event_type
+        jsonb payload
+        text phase
     }
 
     complaints {
-        string id
-        string reference_id
-        string call_sid
-        string category
-        string status
-        json government_payload
+        uuid id
+        text reference_id
+        text call_sid
+        text category
+        text status
+        jsonb government_payload
     }
 
     call_queue {
-        string id
-        string call_sid
-        string status
+        uuid id
+        text call_sid
+        text status
         float priority_score
         int position
         int estimated_wait_sec
-        string service_target
+        text service_target
     }
 ```
-
-### Runtime Modes
-
-| Mode | Purpose | Storage | AI/Voice |
-|---|---|---|---|
-| Local demo | Fast development and judging walkthrough | In-memory fallback | Deterministic analyzer, local embedding fallback, TTS fallback |
-| Integrated demo | Real dashboard plus durable records | Supabase and optional Redis | Configurable provider cascade |
-| Phone demo | Real Twilio call | Supabase recommended | Twilio Media Stream plus STT/TTS providers |
-| Production target | Government-ready deployment shape | Supabase/Postgres, Redis, observability | Bhashini-first voice, audited AI decisions, warm transfer |
 
 ## Repository Structure
 
 ```text
 .
 |-- backend/
-|   |-- app.py                       # ASGI entrypoint for deployment
-|   |-- main.py                      # FastAPI app, Twilio webhooks, REST API
+|   |-- app.py                       # ASGI entrypoint: backend.app:app
+|   |-- main.py                      # FastAPI app, webhooks, REST API
 |   |-- config.py                    # Typed environment settings
-|   |-- decision_engine.py           # Main AI-first decision pipeline
+|   |-- security.py                  # API auth, rate limit, request IDs, Twilio validation
+|   |-- decision_engine.py           # AI-first call decision pipeline
 |   |-- media_stream.py              # Twilio WebSocket voice loop
 |   |-- vector_admin.py              # Seed/backfill vector cases
 |   |-- intelligence/
-|   |   |-- analyzer.py              # Deterministic and LLM analyzers
-|   |   |-- embeddings.py            # Deterministic/OpenAI embedding providers
-|   |   |-- safety_rules.py          # Handover policy
+|   |   |-- analyzer.py              # Deterministic and LLM analysis
+|   |   |-- embeddings.py            # Deterministic/OpenAI-compatible embeddings
+|   |   |-- safety_rules.py          # Handover and safety policy
 |   |   |-- schemas.py               # Shared domain models
 |   |   `-- similarity.py            # Smart Similarity retrieval
 |   |-- persistence/
-|   |   |-- complaints.py            # Complaint/action registry
-|   |   |-- models.sql               # Supabase schema
-|   |   |-- pii.py                   # PII helpers
-|   |   `-- repository.py            # Call state, events, logs
+|   |   |-- complaints.py            # Complaint registry and timeline
+|   |   |-- models.sql               # Supabase schema and pgvector RPC
+|   |   |-- pii.py                   # PII masking helpers
+|   |   `-- repository.py            # Call state, logs, events, Redis/local fallback
 |   |-- routing/
 |   |   |-- officer_router.py        # Urgency/language/wait scoring
 |   |   |-- queue_manager.py         # Priority queue and High-Help Alert
@@ -248,26 +265,47 @@ erDiagram
 |       |-- tts.py                   # TTS provider cascade and phrase cache
 |       `-- vad.py                   # Voice activity detection
 |-- dashboard/
-|   `-- app.py                       # Streamlit command center
-|-- tests/                           # Regression tests
-|-- Makefile                         # Common developer commands
-|-- ROADMAP.md                       # Phase-wise build plan
-|-- IMPLEMENTATION_PLAN.txt          # Original project idea and plan
-|-- requirements.txt
-`-- .env.example
+|   |-- app/                         # Next.js dashboard
+|   |-- app/api/sahayak/[...path]/   # Server-side proxy to backend
+|   |-- package.json                 # Dashboard scripts and dependencies
+|   `-- app.py                       # Legacy Streamlit fallback
+|-- tests/                           # Regression test suite
+|-- Makefile                         # Developer commands
+|-- ROADMAP.md                       # Phase-wise implementation roadmap
+|-- requirements.txt                 # Python dependencies
+|-- pyproject.toml                   # pytest/ruff config
+`-- .env.example                     # Safe environment template
 ```
 
-## Setup
+## Tech Stack
 
-### Prerequisites
+| Layer | Technology |
+|---|---|
+| Backend API | FastAPI, Uvicorn |
+| Voice stream | Twilio Media Streams WebSocket |
+| Telephony | Twilio today, designed for Exotel/SIP adapter support |
+| STT | Bhashini, Deepgram, Google/Gemini/OpenAI fallback paths |
+| TTS | Bhashini, Google/gTTS, Edge TTS, OpenAI fallback paths |
+| LLM analysis | OpenAI-compatible client, Gemini-compatible base URL support, deterministic fallback |
+| Embeddings | OpenAI-compatible embeddings or deterministic local embeddings |
+| Database | Supabase Postgres |
+| Vector DB | Supabase pgvector |
+| Live state | Redis optional, local in-memory fallback |
+| Dashboard | Next.js, React, TypeScript |
+| Testing | pytest, ruff, Next typecheck/build |
 
-- Python 3.11 or newer
-- A terminal with `make`
-- Optional: Supabase project for durable DB and vector search
-- Optional: Twilio account and ngrok for real phone calls
-- Optional: provider keys for Bhashini, Deepgram, Gemini, OpenAI
+## Quick Start
 
-### Install Dependencies
+This path runs the project locally without paid provider keys. It uses deterministic AI fallbacks and local storage where possible.
+
+### 1. Clone and enter the project
+
+```bash
+git clone <your-repo-url>
+cd Sahayak-1092
+```
+
+### 2. Create Python environment
 
 ```bash
 python -m venv .venv
@@ -275,163 +313,51 @@ source .venv/bin/activate
 .venv/bin/python -m pip install --prefer-binary -r requirements.txt
 ```
 
-On Windows:
+On Windows PowerShell:
 
-```bash
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\Activate.ps1
 .venv\Scripts\python -m pip install --prefer-binary -r requirements.txt
 ```
 
-### Create `.env`
+### 3. Create backend env file
 
 ```bash
 cp .env.example .env
 ```
 
-For local development, blank provider keys are allowed. Sahayak will use deterministic and local fallbacks where possible.
-
-## Environment Variables
-
-### Minimum Local Demo
+For a local text-only demo, keep these values:
 
 ```env
 SAHAYAK_ENV=development
 DEBUG=true
 DEMO_MODE=true
 BASE_URL=http://localhost:8000
-SAHAYAK_API_URL=http://localhost:8000
-
 ANALYSIS_PROVIDER=deterministic
 EMBEDDING_PROVIDER=deterministic
 TRANSFER_MODE=mock
+DASHBOARD_AUTH_REQUIRED=false
+VALIDATE_TWILIO_SIGNATURES=false
 ```
 
-### AI and Voice Providers
+### 4. Create dashboard env file
 
-| Variable | Used for |
-|---|---|
-| `OPENAI_API_KEY` | LLM analysis, response generation, embeddings, Whisper/TTS fallback |
-| `OPENAI_BASE_URL` | OpenAI-compatible provider endpoint |
-| `LLM_MODEL` | Main LLM model name |
-| `BHASHINI_API_KEY` | Indian-language STT/TTS provider |
-| `BHASHINI_USER_ID` | Bhashini user identifier |
-| `DEEPGRAM_API_KEY` | STT fallback |
-| `GEMINI_API_KEY` | Google/Gemini fallback path |
-| `STT_PROVIDER_ORDER` | Ordered STT provider cascade |
-| `TTS_PROVIDER_ORDER` | Ordered TTS provider cascade |
-| `VOICE_PROVIDER_TIMEOUT_SEC` | Per-provider voice timeout |
-| `TTS_PHRASE_CACHE_ENABLED` | Cache common spoken phrases after first synthesis |
-
-### Telephony
-
-| Variable | Used for |
-|---|---|
-| `TWILIO_ACCOUNT_SID` | Twilio REST client |
-| `TWILIO_AUTH_TOKEN` | Twilio REST client |
-| `TWILIO_PHONE_NUMBER` | Incoming/outbound Twilio number |
-| `BASE_URL` | Public backend URL used by Twilio webhooks |
-| `TRANSFER_MODE` | `mock` for local demo, `twilio` for real transfer mode |
-
-### Persistence and Similarity
-
-| Variable | Used for |
-|---|---|
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_KEY` | Supabase API key |
-| `REDIS_URL` | Optional live call state store |
-| `EMBEDDING_PROVIDER` | `deterministic`, `openai`, or `auto` |
-| `EMBEDDING_MODEL` | Embedding model name |
-| `EMBEDDING_DIMENSION` | Vector dimension, default `1536` |
-| `VECTOR_SEARCH_LIMIT` | Candidate count for vector search |
-| `VECTOR_DB_MATCH_THRESHOLD` | DB-side cosine similarity threshold |
-| `SIMILARITY_MATCH_THRESHOLD` | Final blended similarity threshold |
-
-### Decision and Queue Settings
-
-| Variable | Default | Used for |
-|---|---:|---|
-| `LOW_CONFIDENCE_THRESHOLD` | `0.5` | Retry/handover threshold |
-| `LOW_CONFIDENCE_MAX_ATTEMPTS` | `2` | Max low-confidence attempts before human handover |
-| `AUTONOMOUS_CONFIDENCE_THRESHOLD` | `0.7` | Minimum confidence for autonomous progress |
-| `EXTREME_URGENCY_THRESHOLD` | `0.9` | Urgency threshold for immediate human path |
-| `HIGH_HELP_ALERT_TIMEOUT_SEC` | `120` | Production queue timeout |
-| `HIGH_HELP_ALERT_DEMO_TIMEOUT_SEC` | `20` | Short demo-mode queue timeout |
-
-## Supabase and Vector DB
-
-Supabase is used for durable persistence. The vector DB is Supabase Postgres with the `pgvector` extension.
-
-### What Supabase Stores
-
-| Table | Purpose |
-|---|---|
-| `agents` | Officer profile, languages, specialties, availability, wait/load |
-| `resolved_cases` | Knowledge base of handled cases and their embeddings |
-| `call_logs` | Call-level record, transcript, summary, outcome, handover/queue fields |
-| `call_events` | Immutable audit events for every major decision |
-| `complaints` | Structured citizen complaint/action records |
-| `complaint_timeline` | Timeline of complaint and government-payload events |
-| `call_queue` | Durable surge queue entries, priority score, status, High-Help Alert data |
-
-### How Vector Search Works
-
-```mermaid
-flowchart LR
-    NewIssue["New caller issue"] --> Embed["Generate issue embedding"]
-    Embed --> Match["Supabase RPC<br/>match_resolved_cases"]
-    Match --> Cases["resolved_cases.embedding"]
-    Cases --> Rank["Blend vector score<br/>with category/language/urgency signals"]
-    Rank --> Decision{"High-quality match?"}
-    Decision -->|Yes| Reuse["Adapt prior resolution"]
-    Decision -->|No| Fresh["Generate new resolution"]
-```
-
-The vector DB is used inside Smart Similarity Detection:
-
-- `backend/intelligence/embeddings.py` generates embeddings.
-- `backend/intelligence/similarity.py` queries similar resolved cases.
-- `backend/persistence/models.sql` defines `resolved_cases.embedding` and `match_resolved_cases(...)`.
-- `backend/vector_admin.py` seeds and backfills vector data.
-
-Local development can use deterministic embeddings. Production should use provider embeddings with stable dimensions.
-
-### Create Supabase Schema
-
-1. Create a Supabase project.
-2. Open the Supabase SQL Editor.
-3. Run all SQL from:
-
-```text
-backend/persistence/models.sql
-```
-
-4. Add credentials to `.env`:
+Create `dashboard/.env.local`:
 
 ```env
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your_supabase_key
+SAHAYAK_API_URL=http://localhost:8000
+NEXT_PUBLIC_SAHAYAK_API_URL=http://localhost:8000
+SAHAYAK_DASHBOARD_API_KEY=
 ```
 
-5. For production vector search, configure embeddings:
-
-```env
-EMBEDDING_PROVIDER=openai
-OPENAI_API_KEY=your_key
-EMBEDDING_MODEL=text-embedding-3-small
-EMBEDDING_DIMENSION=1536
-```
-
-6. Seed and backfill demo cases:
+### 5. Install dashboard dependencies
 
 ```bash
-make PYTHON=.venv/bin/python seed-vector-cases
-make PYTHON=.venv/bin/python backfill-vector-embeddings
+make install-dashboard
 ```
 
-## Run Locally
-
-### Backend
+### 6. Start backend
 
 ```bash
 make PYTHON=.venv/bin/python dev-backend
@@ -445,43 +371,21 @@ Health: http://localhost:8000/health
 Docs:   http://localhost:8000/docs
 ```
 
-### Dashboard
+### 7. Start dashboard
+
+Open a second terminal:
 
 ```bash
-make PYTHON=.venv/bin/python dev-dashboard
+make dev-dashboard
 ```
 
 Dashboard URL:
 
 ```text
-http://localhost:8501
+http://localhost:3000
 ```
 
-## Testing
-
-Run the full verification suite:
-
-```bash
-make PYTHON=.venv/bin/python smoke
-.venv/bin/python -m ruff check backend dashboard tests
-```
-
-Or run directly:
-
-```bash
-.venv/bin/python -m compileall backend dashboard tests
-.venv/bin/python -m pytest -q
-```
-
-Current verified result:
-
-```text
-42 passed
-```
-
-### Text-Only Pipeline Test
-
-Use this before trying a real phone call:
+### 8. Run a text-only pipeline call
 
 ```bash
 curl -X POST http://localhost:8000/api/test-pipeline \
@@ -489,7 +393,7 @@ curl -X POST http://localhost:8000/api/test-pipeline \
   -d '{"call_sid":"demo-mobile-1","text":"My mobile phone was stolen at Majestic bus stand","language":"english"}'
 ```
 
-Then confirm Vachan using the same `call_sid`:
+Then confirm the Vachan loop:
 
 ```bash
 curl -X POST http://localhost:8000/api/test-pipeline \
@@ -497,65 +401,335 @@ curl -X POST http://localhost:8000/api/test-pipeline \
   -d '{"call_sid":"demo-mobile-1","text":"yes","language":"english"}'
 ```
 
-Check created complaints:
+Check the result in the dashboard, or call:
 
 ```bash
 curl http://localhost:8000/api/complaints
-```
-
-Check audit events:
-
-```bash
 curl "http://localhost:8000/api/call-events?call_sid=demo-mobile-1&limit=50"
 ```
 
-### Queue and Surge Test
+## Environment Setup
 
-To show the no-agent surge behavior:
+Never commit `.env`, `dashboard/.env.local`, or real keys. They are ignored by git.
 
-1. Set all dashboard agents unavailable, or use an empty `agents` table.
-2. Trigger a human-request or high-urgency call through `/api/test-pipeline`.
-3. Check queue state:
+### Backend `.env`
 
-```bash
-curl http://localhost:8000/api/queue
+Use `.env.example` as the source of truth. The most important groups are:
+
+#### App Runtime
+
+```env
+SAHAYAK_ENV=development
+DEBUG=true
+DEMO_MODE=true
+HOST=0.0.0.0
+PORT=8000
+BASE_URL=http://localhost:8000
+CORS_ORIGINS=*
 ```
 
-4. Open the dashboard Queue page to see position, wait, priority, and High-Help Alert status.
+`BASE_URL` must be public when Twilio is calling your backend. For local phone testing, this is usually an ngrok URL.
 
-## Live Phone Call
+#### Dashboard Connection
 
-Manual telephony setup is required.
+```env
+SAHAYAK_API_URL=http://localhost:8000
+NEXT_PUBLIC_SAHAYAK_API_URL=http://localhost:8000
+SAHAYAK_DASHBOARD_API_KEY=
+```
 
-1. Start backend:
+For the Next.js dashboard, the main production variable is `SAHAYAK_DASHBOARD_API_KEY`, used by the server-side proxy.
+
+#### Telephony
+
+```env
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_PHONE_NUMBER=
+TRANSFER_MODE=mock
+```
+
+Use `TRANSFER_MODE=mock` for local demos. Use `TRANSFER_MODE=twilio` for real warm transfer testing.
+
+#### AI and Voice Providers
+
+```env
+OPENAI_API_KEY=
+OPENAI_BASE_URL=
+LLM_MODEL=gpt-4o
+ANALYSIS_PROVIDER=auto
+
+BHASHINI_API_KEY=
+BHASHINI_USER_ID=
+BHASHINI_PIPELINE_URL=https://dhruva-api.bhashini.gov.in/services/inference
+
+DEEPGRAM_API_KEY=
+GEMINI_API_KEY=
+STT_PROVIDER_ORDER=bhashini,deepgram,google,openai_whisper
+TTS_PROVIDER_ORDER=bhashini,google,edge,openai
+VOICE_PROVIDER_TIMEOUT_SEC=12
+TTS_PHRASE_CACHE_ENABLED=true
+```
+
+If you use Gemini through an OpenAI-compatible endpoint, set:
+
+```env
+OPENAI_API_KEY=your_gemini_key
+OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+LLM_MODEL=gemini-1.5-flash
+```
+
+#### Persistence and Vector Search
+
+```env
+SUPABASE_URL=
+SUPABASE_KEY=
+REDIS_URL=
+
+EMBEDDING_PROVIDER=deterministic
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSION=1536
+VECTOR_SEARCH_LIMIT=10
+VECTOR_DB_MATCH_THRESHOLD=0.15
+SIMILARITY_MATCH_THRESHOLD=0.7
+```
+
+For production vector search, use provider-backed embeddings:
+
+```env
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=your_embedding_provider_key
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSION=1536
+```
+
+#### Security
+
+```env
+VALIDATE_TWILIO_SIGNATURES=false
+DASHBOARD_AUTH_REQUIRED=false
+DASHBOARD_API_KEY=
+DASHBOARD_ADMIN_KEY=
+DASHBOARD_READONLY_KEY=
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_PER_MINUTE=180
+MUTATION_RATE_LIMIT_PER_MINUTE=60
+REQUEST_ID_HEADER=X-Request-ID
+MASK_PII_IN_LOGS=true
+DATA_RETENTION_DAYS=180
+```
+
+For production:
+
+```env
+DEMO_MODE=false
+DEBUG=false
+VALIDATE_TWILIO_SIGNATURES=true
+DASHBOARD_AUTH_REQUIRED=true
+DASHBOARD_API_KEY=generate-a-long-random-secret
+```
+
+### Dashboard `dashboard/.env.local`
+
+Create this file for local dashboard development:
+
+```env
+SAHAYAK_API_URL=http://localhost:8000
+NEXT_PUBLIC_SAHAYAK_API_URL=http://localhost:8000
+SAHAYAK_DASHBOARD_API_KEY=
+```
+
+When backend auth is enabled, set:
+
+```env
+SAHAYAK_DASHBOARD_API_KEY=same-value-as-backend-DASHBOARD_API_KEY
+```
+
+## Supabase and Vector DB
+
+Supabase is the durable system of record. The vector database is Supabase Postgres with the `pgvector` extension.
+
+Local development can run without Supabase because the backend has local fallback storage. For a realistic demo or production deployment, configure Supabase.
+
+### What Supabase Stores
+
+| Table | Purpose |
+|---|---|
+| `agents` | Officer profile, languages, specialties, availability, wait/load |
+| `resolved_cases` | Human-resolved case knowledge base with embeddings |
+| `call_logs` | Call-level summary, transcript, outcome, similarity, queue/handover state |
+| `call_events` | Immutable event/audit log for decisions and actions |
+| `complaints` | Structured complaint/action records |
+| `complaint_timeline` | Timeline for each complaint reference |
+| `call_queue` | Priority queue, DTMF redirect, and High-Help Alert data |
+
+### Create the Schema
+
+1. Create a Supabase project.
+2. Open Supabase SQL Editor.
+3. Run the full SQL in:
+
+```text
+backend/persistence/models.sql
+```
+
+4. Add credentials:
+
+```env
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-supabase-key
+```
+
+5. Seed demo resolved cases:
+
+```bash
+make PYTHON=.venv/bin/python seed-vector-cases
+```
+
+6. Backfill embeddings:
+
+```bash
+make PYTHON=.venv/bin/python backfill-vector-embeddings
+```
+
+### How Smart Similarity Uses Vector DB
+
+```mermaid
+flowchart LR
+    Issue["New caller issue"] --> Embed["Generate embedding"]
+    Embed --> RPC["Supabase RPC<br/>match_resolved_cases"]
+    RPC --> Cases["resolved_cases.embedding"]
+    Cases --> Rank["Blend vector similarity<br/>with category/language/urgency"]
+    Rank --> Decision{"Good match?"}
+    Decision -->|"Yes"| Reuse["Adapt previous officer resolution"]
+    Decision -->|"No"| Generate["Create fresh response/action"]
+```
+
+The implementation lives in:
+
+- `backend/intelligence/embeddings.py`
+- `backend/intelligence/similarity.py`
+- `backend/persistence/models.sql`
+- `backend/vector_admin.py`
+
+## Run the App
+
+### Backend
 
 ```bash
 make PYTHON=.venv/bin/python dev-backend
 ```
 
-2. Start a public tunnel:
+Direct command:
+
+```bash
+.venv/bin/python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### Next.js Dashboard
+
+```bash
+make dev-dashboard
+```
+
+Direct command:
+
+```bash
+npm --prefix dashboard run dev -- --hostname 127.0.0.1 --port 3000
+```
+
+### Legacy Streamlit Dashboard
+
+The old Streamlit dashboard remains as a fallback:
+
+```bash
+make PYTHON=.venv/bin/python dev-dashboard-legacy
+```
+
+## Testing
+
+Run the smoke suite:
+
+```bash
+make PYTHON=.venv/bin/python smoke
+```
+
+Run lint/type checks:
+
+```bash
+.venv/bin/python -m ruff check backend dashboard tests
+npm --prefix dashboard run typecheck
+```
+
+Run the dashboard production build:
+
+```bash
+npm --prefix dashboard run build
+```
+
+Run a dependency audit for dashboard production dependencies:
+
+```bash
+npm --prefix dashboard audit --omit=dev
+```
+
+Current verified project status:
+
+```text
+Python tests: 48 passed
+Ruff: passed
+Next.js typecheck: passed
+Next.js build: passed
+Dashboard npm audit: 0 vulnerabilities
+```
+
+## Live Twilio Call Setup
+
+Use this only after the text-only pipeline works.
+
+### 1. Start backend
+
+```bash
+make PYTHON=.venv/bin/python dev-backend
+```
+
+### 2. Start a public tunnel
 
 ```bash
 ngrok http 8000
 ```
 
-3. Set `.env`:
+### 3. Update backend `.env`
 
 ```env
-BASE_URL=https://your-ngrok-url.ngrok-free.app
-TWILIO_ACCOUNT_SID=your_sid
-TWILIO_AUTH_TOKEN=your_token
+BASE_URL=https://your-ngrok-domain.ngrok-free.app
+TWILIO_ACCOUNT_SID=your_twilio_sid
+TWILIO_AUTH_TOKEN=your_twilio_auth_token
 TWILIO_PHONE_NUMBER=your_twilio_number
+TRANSFER_MODE=twilio
 ```
 
-4. Restart backend.
-5. In Twilio Console, set the voice webhook:
+For production-like public webhook testing:
+
+```env
+VALIDATE_TWILIO_SIGNATURES=true
+```
+
+### 4. Configure Twilio Voice Webhook
+
+In Twilio Console, set the phone number voice webhook:
 
 ```text
-POST {BASE_URL}/twilio/incoming
+POST https://your-ngrok-domain.ngrok-free.app/twilio/incoming
 ```
 
-6. Call the Twilio number, or ask Sahayak to call your phone:
+The backend will return TwiML that connects the call to:
+
+```text
+wss://your-ngrok-domain.ngrok-free.app/twilio/media-stream
+```
+
+### 5. Optional outbound call test
 
 ```bash
 curl -X POST http://localhost:8000/api/call-me \
@@ -563,11 +737,29 @@ curl -X POST http://localhost:8000/api/call-me \
   -d '{"phone":"+91XXXXXXXXXX"}'
 ```
 
-Twilio should connect to:
+## Dashboard
+
+The main dashboard is a Next.js app in `dashboard/app`.
+
+It is designed as an officer command center, not a simple static UI. It supports:
+
+- Live call monitoring.
+- Active transcript and AI summary.
+- Language, sentiment, urgency, confidence, and outcome cards.
+- Officer availability controls.
+- Warm handover acceptance.
+- Complaint and timeline visibility.
+- Priority queue monitoring.
+- High-Help Alert visibility.
+- Resolved-case learning from corrected calls.
+
+The dashboard calls the backend through the server-side route:
 
 ```text
-wss://<ngrok-host>/twilio/media-stream
+dashboard/app/api/sahayak/[...path]/route.ts
 ```
+
+This keeps the backend API key server-side instead of exposing it to the browser.
 
 ## API Reference
 
@@ -575,66 +767,195 @@ wss://<ngrok-host>/twilio/media-stream
 |---|---|---|
 | `POST` | `/twilio/incoming` | Incoming Twilio voice webhook |
 | `POST` | `/twilio/status` | Twilio call status callback |
-| `WS` | `/twilio/media-stream` | Bidirectional audio WebSocket |
+| `WS` | `/twilio/media-stream` | Bidirectional Twilio audio WebSocket |
 | `POST` | `/api/call-me` | Start outbound call to a phone number |
-| `POST` | `/api/test-pipeline` | Text-only pipeline test |
-| `GET` | `/api/active-calls` | Live active calls for dashboard |
+| `POST` | `/api/test-pipeline` | Text-only AI pipeline test |
+| `GET` | `/api/active-calls` | Active calls for dashboard |
 | `GET` | `/api/call-logs` | Recent call logs |
 | `GET` | `/api/call-transcript/{call_sid}` | Transcript for one call |
 | `GET` | `/api/call-events` | Audit events, optionally filtered by `call_sid` |
 | `GET` | `/api/agents` | Officer list |
 | `POST` | `/api/agent/toggle` | Toggle officer availability |
-| `POST` | `/api/handover/{call_sid}/accept` | Officer accepts a warm handover |
-| `GET` | `/api/queue` | Priority queue entries |
-| `GET` | `/api/queue/{call_sid}` | One queue entry |
+| `POST` | `/api/calls/{call_sid}/corrections` | Store officer correction as audit event |
+| `POST` | `/api/handover/{call_sid}/accept` | Officer accepts warm handover |
 | `GET` | `/api/complaints` | Structured complaints/actions |
 | `GET` | `/api/complaints/{reference_id}/timeline` | Complaint timeline |
 | `GET` | `/api/resolved-cases` | Resolved case knowledge base |
-| `GET` | `/health` | Service health |
+| `POST` | `/api/resolved-cases/from-call` | Add corrected call resolution to knowledge base |
+| `GET` | `/api/queue` | Priority queue entries |
+| `GET` | `/api/queue/{call_sid}` | One queue entry |
+| `GET` | `/health` | Health and readiness metadata |
+| `GET` | `/` | Basic service metadata |
 
-## Demo Guide
+When `DASHBOARD_AUTH_REQUIRED=true`, protected `/api/*` requests require:
 
-For a stable competition demo, use this order:
+```text
+X-Sahayak-API-Key: <DASHBOARD_API_KEY>
+```
 
-1. Open `/health` and show service readiness.
-2. Open the Streamlit dashboard.
-3. Run a text pipeline call for a phone theft or waterlogging issue.
-4. Show language, urgency, confidence, and AI summary.
-5. Show Smart Similarity match and adapted resolution.
-6. Show the Vachan confirmation prompt.
-7. Send `yes` with the same `call_sid`.
-8. Show generated complaint reference ID and complaint timeline.
-9. Toggle officers unavailable and trigger a human-request call.
-10. Show priority queue and High-Help Alert behavior.
-11. Toggle an officer available and show warm handover context.
-12. If Twilio is configured, repeat the story with a live phone call.
+The Next.js dashboard proxy sends this automatically when `SAHAYAK_DASHBOARD_API_KEY` is configured.
 
-## Production Notes
+## Production Deployment
 
-Sahayak is built so development remains easy, while production concerns are explicit.
+### Backend
 
-- Use `TRANSFER_MODE=mock` for local demos and `TRANSFER_MODE=twilio` for real call transfer testing.
-- Run `backend/persistence/models.sql` whenever Supabase schema changes.
-- Keep `DEMO_MODE=true` for hackathon demos with shorter queue timeout.
-- Use `DEMO_MODE=false` for production-like behavior.
-- Store real secrets only in `.env` or your deployment secret manager.
-- Use Supabase for durable records and pgvector retrieval.
-- Use Redis when multiple backend workers need shared live call state.
-- Review PII retention and masking rules before real deployment.
+Deploy the backend as an ASGI app:
+
+```text
+backend.app:app
+```
+
+Recommended start command:
+
+```bash
+uvicorn backend.app:app --host 0.0.0.0 --port $PORT
+```
+
+Minimum production backend env:
+
+```env
+SAHAYAK_ENV=production
+DEBUG=false
+DEMO_MODE=false
+HOST=0.0.0.0
+PORT=8000
+BASE_URL=https://your-backend-domain.com
+CORS_ORIGINS=https://your-dashboard-domain.com
+
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-backend-supabase-key
+REDIS_URL=your-redis-url
+
+TWILIO_ACCOUNT_SID=your_twilio_sid
+TWILIO_AUTH_TOKEN=your_twilio_auth_token
+TWILIO_PHONE_NUMBER=your_twilio_number
+TRANSFER_MODE=twilio
+
+VALIDATE_TWILIO_SIGNATURES=true
+DASHBOARD_AUTH_REQUIRED=true
+DASHBOARD_API_KEY=your-long-random-dashboard-key
+RATE_LIMIT_ENABLED=true
+MASK_PII_IN_LOGS=true
+
+ANALYSIS_PROVIDER=auto
+OPENAI_API_KEY=your-openai-or-openai-compatible-key
+OPENAI_BASE_URL=
+LLM_MODEL=gpt-4o
+
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSION=1536
+
+BHASHINI_API_KEY=your_bhashini_key
+BHASHINI_USER_ID=your_bhashini_user_id
+DEEPGRAM_API_KEY=your_deepgram_key
+```
+
+### Dashboard
+
+Build command:
+
+```bash
+npm --prefix dashboard install
+npm --prefix dashboard run build
+```
+
+Start command:
+
+```bash
+npm --prefix dashboard run start
+```
+
+Dashboard deployment env:
+
+```env
+SAHAYAK_API_URL=https://your-backend-domain.com
+NEXT_PUBLIC_SAHAYAK_API_URL=https://your-backend-domain.com
+SAHAYAK_DASHBOARD_API_KEY=same-value-as-backend-DASHBOARD_API_KEY
+```
+
+### Deployment Checklist
+
+- Supabase schema from `backend/persistence/models.sql` is applied.
+- `resolved_cases` has seeded cases and embeddings.
+- `BASE_URL` is the public backend HTTPS URL.
+- Twilio webhook points to `{BASE_URL}/twilio/incoming`.
+- `VALIDATE_TWILIO_SIGNATURES=true` for public Twilio use.
+- Dashboard and backend share the dashboard API key.
+- `CORS_ORIGINS` is restricted to the real dashboard domain.
+- Redis is configured if running multiple backend workers.
+- Real secrets are stored in the deployment secret manager.
+
+## Demo Script
+
+For a competition demo, use this flow:
+
+1. Open the Next.js dashboard at `http://localhost:3000`.
+2. Open backend health at `http://localhost:8000/health`.
+3. Run a text-only call for a mobile theft, cyber fraud, waterlogging, or suspicious activity issue.
+4. Show language, urgency, confidence, summary, and current outcome.
+5. Show the Vachan prompt.
+6. Send `yes` with the same `call_sid`.
+7. Show the created complaint reference and timeline.
+8. Open call events to show auditability.
+9. Toggle officers unavailable.
+10. Trigger a human-request or high-distress call.
+11. Show queue position, priority, and High-Help Alert behavior.
+12. Toggle an officer available and show warm handover context.
+13. If Twilio is configured, repeat with a live phone call.
+
+Useful demo commands:
+
+```bash
+curl -X POST http://localhost:8000/api/test-pipeline \
+  -H "Content-Type: application/json" \
+  -d '{"call_sid":"demo-theft-1","text":"My mobile phone was stolen at Majestic bus stand","language":"english"}'
+
+curl -X POST http://localhost:8000/api/test-pipeline \
+  -H "Content-Type: application/json" \
+  -d '{"call_sid":"demo-theft-1","text":"yes","language":"english"}'
+
+curl -X POST http://localhost:8000/api/test-pipeline \
+  -H "Content-Type: application/json" \
+  -d '{"call_sid":"demo-human-1","text":"I am scared and I want to speak to an officer immediately","language":"english"}'
+```
 
 ## Developer Commands
 
 ```bash
 make PYTHON=.venv/bin/python install
+make install-dashboard
 make PYTHON=.venv/bin/python dev-backend
-make PYTHON=.venv/bin/python dev-dashboard
+make dev-dashboard
+make PYTHON=.venv/bin/python dev-dashboard-legacy
 make PYTHON=.venv/bin/python test
 make PYTHON=.venv/bin/python lint
 make PYTHON=.venv/bin/python format
 make PYTHON=.venv/bin/python smoke
 make PYTHON=.venv/bin/python seed-vector-cases
 make PYTHON=.venv/bin/python backfill-vector-embeddings
+make clean
 ```
+
+## Security Notes
+
+- `.env` and `dashboard/.env.local` must never be committed.
+- Rotate any key that has ever been pasted into chat, screenshots, or public commits.
+- Keep `MASK_PII_IN_LOGS=true`.
+- Keep `VALIDATE_TWILIO_SIGNATURES=true` for public Twilio webhooks.
+- Keep `DASHBOARD_AUTH_REQUIRED=true` outside local demo mode.
+- Use the Next.js proxy route instead of exposing backend keys to the browser.
+- Use Supabase RLS/service-role policy carefully before real citizen data.
+- Review data retention rules before any real-world pilot.
+
+## Runtime Modes
+
+| Mode | Use case | Key settings |
+|---|---|---|
+| Local demo | Fast offline development | `DEMO_MODE=true`, deterministic analysis/embeddings, `TRANSFER_MODE=mock` |
+| Integrated demo | Real dashboard and Supabase records | Supabase configured, optional provider keys |
+| Phone demo | Twilio call flow | Twilio keys, `BASE_URL` public, media stream enabled |
+| Production target | Real deployment shape | `DEMO_MODE=false`, auth/signature validation enabled, Supabase, Redis, provider keys |
 
 ## License
 

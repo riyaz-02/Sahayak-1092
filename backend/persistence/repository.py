@@ -32,8 +32,10 @@ CALL_EVENT_TYPES = {
     "vachan_rejected",
     "vachan_partial",
     "vachan_correction_requested",
+    "ai_correction_applied",
     "complaint_registered",
     "complaint_timeline_updated",
+    "knowledge_base_case_added",
     "handover_requested",
     "officer_matched",
     "handover_accepted",
@@ -454,11 +456,16 @@ class CallStateRepository:
 
     @staticmethod
     def _state_summary(state: CallState) -> dict[str, Any]:
+        latest_analysis = state.analyses[-1] if state.analyses else {}
         return {
             "call_sid": state.call_sid,
             "caller_number": state.caller_number,
             "language": state.language,
             "dialect": state.dialect,
+            "category": latest_analysis.get("category", "general"),
+            "sentiment": latest_analysis.get("sentiment", "calm"),
+            "urgency": latest_analysis.get("urgency", 0.0),
+            "confidence": latest_analysis.get("confidence", 0.0),
             "phase": state.current_phase,
             "ai_summary": state.ai_summary,
             "matched_case_id": state.matched_case_id,

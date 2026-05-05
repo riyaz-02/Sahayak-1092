@@ -27,6 +27,7 @@ from backend.decision_engine import (
 )
 from backend.persistence.repository import get_call_repository
 from backend.routing.queue_manager import DTMF_SERVICE_MAP, get_queue_manager
+from backend.security import json_log
 from backend.voice.audio_codec import (
     MULAW_SAMPLE_RATE,
     create_wav_header as _create_wav_header,
@@ -108,7 +109,7 @@ class MediaStreamHandler:
 
         try:
             await self.ws.accept()
-            print("WebSocket connected")
+            json_log("websocket_connected")
 
             async for message in self.ws.iter_text():
                 try:
@@ -116,7 +117,7 @@ class MediaStreamHandler:
                     event = data.get("event")
 
                     if event == "connected":
-                        print("Twilio Media Stream connected")
+                        json_log("twilio_media_connected")
 
                     elif event == "start":
                         await self._handle_start(data)
@@ -129,20 +130,20 @@ class MediaStreamHandler:
                         await self._handle_dtmf(data["dtmf"]["digit"])
 
                     elif event == "stop":
-                        print(f"Stream stopped: {self.stream_sid}")
+                        json_log("stream_stopped", stream_sid=self.stream_sid, call_sid=self.call_sid)
                         remove_call(self.call_sid)
                         break
 
                 except json.JSONDecodeError:
                     continue
                 except Exception as exc:
-                    print(f"Message handling error: {exc}")
+                    json_log("media_message_error", call_sid=self.call_sid, error=str(exc))
 
         except WebSocketDisconnect:
-            print("WebSocket disconnected")
+            json_log("websocket_disconnected", call_sid=self.call_sid)
             remove_call(self.call_sid)
         except Exception as exc:
-            print(f"WebSocket error: {exc}")
+            json_log("websocket_error", call_sid=self.call_sid, error=str(exc))
             remove_call(self.call_sid)
 
     async def _handle_start(self, data: dict) -> None:
@@ -150,13 +151,13 @@ class MediaStreamHandler:
         self.call_sid = data["start"]["callSid"]
         custom = data["start"].get("customParameters", {})
         self.caller_number = custom.get("callerNumber", "unknown")
-        print(f"Stream started: {self.stream_sid} (Call: {self.call_sid})")
+        json_log("stream_started", stream_sid=self.stream_sid, call_sid=self.call_sid)
 
         call_state = get_or_create_call(self.call_sid, self.caller_number)
         try:
             call_repository.create_call_state(call_state)
         except Exception as exc:
-            print(f"Call-state persistence skipped: {exc}")
+            json_log("call_state_persistence_skipped", call_sid=self.call_sid, error=str(exc))
 
         if not self.greeting_sent:
             await self._send_greeting()
@@ -235,7 +236,7 @@ class MediaStreamHandler:
                 )
                 return
 
-            print(f"Caller [{self.call_sid[-6:]}]: {stt_result.text}")
+            json_log("caller_transcribed", call_sid=self.call_sid, text=stt_result.text)
             call_repository.append_call_event(
                 call_sid=self.call_sid,
                 event_type="stt_completed",
@@ -257,7 +258,12 @@ class MediaStreamHandler:
             response_text = result["response_text"]
             action = result["action"]
             updated_state = get_or_create_call(self.call_sid, self.caller_number)
-            print(f"Sahayak [{self.call_sid[-6:]}]: {response_text[:80]}... (action: {action})")
+            json_log(
+                "sahayak_response",
+                call_sid=self.call_sid,
+                text=response_text,
+                action=action,
+            )
 
             tts_result = await self._speak(
                 response_text,
@@ -283,14 +289,18 @@ class MediaStreamHandler:
             )
 
             if action == "handover":
-                print(f"Handing over to agent: {result.get('agent', {}).get('name', '?')}")
+                json_log(
+                    "handover_response_ready",
+                    call_sid=self.call_sid,
+                    agent=result.get("agent", {}).get("name", "?"),
+                )
             elif action == "queue":
                 asyncio.create_task(self._queue_timeout(queue_manager.queue_timeout_sec()))
             elif action == "resolve":
-                print(f"Call resolved by AI: {self.call_sid[-6:]}")
+                json_log("call_resolved_by_ai", call_sid=self.call_sid)
 
         except Exception as exc:
-            print(f"Utterance processing error: {exc}")
+            json_log("utterance_processing_error", call_sid=self.call_sid, error=str(exc))
         finally:
             self.processing = False
 
@@ -333,7 +343,7 @@ class MediaStreamHandler:
             outcome="ivr_redirect",
             ai_summary=f"IVR redirect to {service['service']}",
         )
-        print(f"IVR redirect to {service['service']}")
+        json_log("ivr_redirect", call_sid=self.call_sid, service=service["service"])
 
     async def _queue_timeout(self, timeout_sec: int) -> None:
         """After the queue timeout, transfer as a High-Help Alert."""
@@ -343,7 +353,7 @@ class MediaStreamHandler:
         if not call_state or call_state.current_phase != "queued":
             return
 
-        print(f"HIGH-HELP ALERT: auto-transferring {self.call_sid[-6:]} to Police")
+        json_log("high_help_alert_transfer", call_sid=self.call_sid)
         queue_entry = queue_manager.mark_high_help_alert(self.call_sid)
         queue_manager.apply_to_call_state(call_state, queue_entry)
         call_state.outcome = CallOutcome.HANDED_OVER
@@ -397,7 +407,7 @@ class MediaStreamHandler:
         if result.audio:
             await self._send_audio(result.audio)
         else:
-            print("TTS failed without fallback audio")
+            json_log("tts_failed_without_audio", call_sid=self.call_sid, context=context)
         return result
 
     async def _send_audio(self, mulaw_audio: bytes) -> None:
