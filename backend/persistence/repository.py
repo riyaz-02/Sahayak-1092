@@ -20,6 +20,9 @@ from backend import supabase_client as db
 
 CALL_EVENT_TYPES = {
     "call_started",
+    "agent_turn_started",
+    "agent_tool_used",
+    "agent_turn_completed",
     "greeting_sent",
     "utterance_received",
     "stt_completed",

@@ -32,6 +32,7 @@ type DashboardData = {
   complaints: AnyRecord[];
   cases: AnyRecord[];
   events: AnyRecord[];
+  agentTraces: AnyRecord[];
 };
 
 type CorrectionForm = {
@@ -62,7 +63,8 @@ const emptyData: DashboardData = {
   queue: [],
   complaints: [],
   cases: [],
-  events: []
+  events: [],
+  agentTraces: []
 };
 
 const tabs: Array<{ key: TabKey; label: string; icon: typeof Activity }> = [
@@ -201,7 +203,8 @@ export default function DashboardPage() {
       queue,
       complaints,
       cases,
-      events
+      events,
+      agentTraces
     ] = await Promise.all([
       apiGet<AnyRecord | null>("/health", null),
       apiGet<AnyRecord>("/api/active-calls", { active_calls: [] }),
@@ -210,7 +213,8 @@ export default function DashboardPage() {
       apiGet<AnyRecord>("/api/queue?include_inactive=true&limit=50", { queue: [] }),
       apiGet<AnyRecord>("/api/complaints", { complaints: [] }),
       apiGet<AnyRecord>("/api/resolved-cases", { cases: [] }),
-      apiGet<AnyRecord>("/api/call-events?limit=80", { events: [] })
+      apiGet<AnyRecord>("/api/call-events?limit=80", { events: [] }),
+      apiGet<AnyRecord>("/api/agent/traces?limit=20", { agent_traces: [] })
     ]);
 
     setData({
@@ -221,7 +225,8 @@ export default function DashboardPage() {
       queue: queue.queue || [],
       complaints: complaints.complaints || [],
       cases: cases.cases || [],
-      events: events.events || []
+      events: events.events || [],
+      agentTraces: agentTraces.agent_traces || []
     });
     setLoading(false);
   }, []);
@@ -291,6 +296,12 @@ export default function DashboardPage() {
       value: data.events.length,
       detail: "latest loaded",
       tone: "#e85d5d"
+    },
+    {
+      label: "Agent turns",
+      value: data.agentTraces.length,
+      detail: "bounded traces",
+      tone: "#4a90d9"
     }
   ];
 
@@ -492,7 +503,12 @@ export default function DashboardPage() {
 
           {tab === "knowledge" && <KnowledgePanel cases={data.cases} />}
 
-          {tab === "audit" && <AuditPanel events={data.events} />}
+          {tab === "audit" && (
+            <>
+              <AgentTracePanel traces={data.agentTraces} />
+              <AuditPanel events={data.events} />
+            </>
+          )}
 
           {tab === "test" && (
             <TestConsole
@@ -909,6 +925,63 @@ function AuditPanel({ events, compact = false }: { events: AnyRecord[]; compact?
   );
 }
 
+function AgentTracePanel({ traces }: { traces: AnyRecord[] }) {
+  return (
+    <section className="panel">
+      <div className="section-header">
+        <div>
+          <div className="section-kicker">Agent runtime</div>
+          <h2 className="section-title">Bounded agent traces</h2>
+          <p className="section-copy">
+            Each trace shows what Sahayak observed, which tools it used, the final action, and why
+            the safety policy allowed or blocked autonomy.
+          </p>
+        </div>
+        <Badge tone="blue">{traces.length} turns</Badge>
+      </div>
+      <div className="event-list">
+        {traces.length === 0 ? (
+          <div className="empty">No agent traces yet. Run a test call to create one.</div>
+        ) : (
+          traces.map((event) => {
+            const trace = event.payload || {};
+            const toolCalls = trace.tool_calls || [];
+            return (
+              <article className="event-row" key={trace.trace_id || event.id}>
+                <div className="row-top">
+                  <div>
+                    <div className="event-name">
+                      <Network size={15} color="#4a90d9" />
+                      {trace.final_action || "continue"} / {trace.final_phase || "unknown"}
+                    </div>
+                    <div className="hash">{trace.trace_id || compactSid(event.call_sid)}</div>
+                  </div>
+                  <Badge tone="blue">{trace.channel || "agent"}</Badge>
+                </div>
+                <p className="summary">{trace.observed_text || "No observed text captured."}</p>
+                <div className="button-row">
+                  {toolCalls.slice(0, 8).map((tool: AnyRecord, index: number) => (
+                    <Badge tone={tool.name === "evaluate_safety_policy" ? "red" : "teal"} key={`${tool.name}-${index}`}>
+                      {tool.name}
+                    </Badge>
+                  ))}
+                </div>
+                {(trace.safety_notes || []).length > 0 && (
+                  <div className="trace-note">
+                    {(trace.safety_notes || []).map((note: string, index: number) => (
+                      <div key={`${note}-${index}`}>{note}</div>
+                    ))}
+                  </div>
+                )}
+              </article>
+            );
+          })
+        )}
+      </div>
+    </section>
+  );
+}
+
 function HealthPanel({ health }: { health: AnyRecord | null }) {
   const persistence = health?.persistence || {};
   return (
@@ -985,8 +1058,38 @@ function TestConsole({
           <Send size={15} />
           Send to Sahayak
         </button>
+        {result?.agent_trace && <AgentTraceSummary trace={result.agent_trace} />}
         {result && <pre className="json-block">{JSON.stringify(result, null, 2)}</pre>}
       </form>
     </section>
+  );
+}
+
+function AgentTraceSummary({ trace }: { trace: AnyRecord }) {
+  const toolCalls = trace.tool_calls || [];
+  return (
+    <div className="trace-summary">
+      <div className="row-top">
+        <div>
+          <div className="section-kicker">Agent trace</div>
+          <div className="caller">{trace.final_action || "continue"} / {trace.final_phase || "unknown"}</div>
+        </div>
+        <Badge tone="blue">{trace.channel || "api_test"}</Badge>
+      </div>
+      <div className="button-row">
+        {toolCalls.slice(0, 10).map((tool: AnyRecord, index: number) => (
+          <Badge tone={tool.name === "evaluate_safety_policy" ? "red" : "teal"} key={`${tool.name}-${index}`}>
+            {tool.name}
+          </Badge>
+        ))}
+      </div>
+      {(trace.safety_notes || []).length > 0 && (
+        <div className="trace-note">
+          {(trace.safety_notes || []).map((note: string, index: number) => (
+            <div key={`${note}-${index}`}>{note}</div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

@@ -64,6 +64,7 @@ class Settings:
     openai_api_key: str = ""
     openai_base_url: str | None = None
     llm_model: str = "gpt-4o"
+    llm_provider_timeout_sec: float = 8.0
     analysis_provider: str = "auto"
     embedding_provider: str = "deterministic"
     embedding_model: str = "text-embedding-3-small"
@@ -156,6 +157,7 @@ def get_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_base_url=os.getenv("OPENAI_BASE_URL") or None,
         llm_model=os.getenv("LLM_MODEL", "gpt-4o"),
+        llm_provider_timeout_sec=_as_float(os.getenv("LLM_PROVIDER_TIMEOUT_SEC"), 8.0),
         analysis_provider=os.getenv("ANALYSIS_PROVIDER", "auto"),
         embedding_provider=os.getenv("EMBEDDING_PROVIDER", "deterministic"),
         embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),

@@ -16,13 +16,13 @@ from dotenv import load_dotenv
 from fastapi import WebSocket, WebSocketDisconnect
 
 from backend import supabase_client as db
+from backend.agent import get_sahayak_agent
 from backend.config import get_settings
 from backend.decision_engine import (
     CallOutcome,
     active_calls,
     get_greeting,
     get_or_create_call,
-    process_caller_input,
     remove_call,
 )
 from backend.persistence.repository import get_call_repository
@@ -43,6 +43,7 @@ load_dotenv()
 settings = get_settings()
 call_repository = get_call_repository()
 queue_manager = get_queue_manager()
+sahayak_agent = get_sahayak_agent()
 
 SILENCE_THRESHOLD = settings.vad_silence_threshold
 SILENCE_DURATION_MS = settings.vad_silence_duration_ms
@@ -248,10 +249,16 @@ class MediaStreamHandler:
             )
 
             decision_started_at = time.perf_counter()
-            result = await process_caller_input(
+            result = await sahayak_agent.handle_text_turn(
                 call_sid=self.call_sid,
                 text=stt_result.text,
                 caller_number=self.caller_number,
+                language=call_state.language,
+                channel="voice",
+                metadata={
+                    "stream_sid": self.stream_sid,
+                    "stt_provider": stt_result.provider,
+                },
             )
             decision_latency_ms = _elapsed_ms(decision_started_at)
 

@@ -56,6 +56,7 @@ queue_manager = get_queue_manager()
 client = AsyncOpenAI(
     api_key=settings.openai_api_key or "local-dev-missing-openai-key",
     base_url=settings.openai_base_url,  # Gemini: https://generativelanguage.googleapis.com/v1beta/openai/
+    timeout=settings.llm_provider_timeout_sec,
 )
 MODEL = settings.llm_model
 
@@ -205,6 +206,8 @@ Urgency: {urgency}"""
 async def generate_response(call_state: CallState, analysis: CallAnalysis,
                             resolution: str = None) -> str:
     """Generate an empathetic, actionable response in the caller's language."""
+    if not settings.openai_api_key:
+        return _deterministic_response(call_state, analysis, resolution)
 
     phase_instructions = {
         "greeting": "Greet the caller warmly and ask how you can help. Use their language.",
@@ -254,13 +257,7 @@ async def generate_response(call_state: CallState, analysis: CallAnalysis,
         return resp.choices[0].message.content.strip()
     except Exception as e:
         print(f"❌ Response generation error: {e}")
-        # Fallback responses by language
-        fallbacks = {
-            "kannada": "ದಯವಿಟ್ಟು ಸ್ವಲ್ಪ ಕಾಯಿರಿ, ನಾನು ನಿಮಗೆ ಸಹಾಯ ಮಾಡುತ್ತೇನೆ.",
-            "hindi": "कृपया थोड़ा इंतज़ार करें, मैं आपकी मदद कर रहा हूँ.",
-            "english": "Please hold on, I am processing your request.",
-        }
-        return fallbacks.get(call_state.language, fallbacks["english"])
+        return _deterministic_response(call_state, analysis, resolution)
 
 
 # ──────────────────────────────────────────────
@@ -842,6 +839,9 @@ def _apply_vachan_correction(summary: str, correction: dict) -> str:
 
 async def _generate_resolution(analysis: CallAnalysis, call_state: CallState) -> str:
     """Generate a resolution for the caller's issue."""
+    if not settings.openai_api_key:
+        return _fallback_resolution(call_state)
+
     messages = [
         {"role": "system", "content": RESOLUTION_SYSTEM_PROMPT.format(language=analysis.language)},
         {"role": "user", "content": f"Category: {analysis.category}\nIssue: {analysis.summary}\nUrgency: {analysis.urgency}\nSentiment: {analysis.sentiment}"},
@@ -855,7 +855,72 @@ async def _generate_resolution(analysis: CallAnalysis, call_state: CallState) ->
         )
         return resp.choices[0].message.content.strip()
     except Exception:
-        return f"Your complaint has been registered. Reference: SAH-{call_state.call_sid[-6:].upper()}. An officer will follow up within 30 minutes."
+        return _fallback_resolution(call_state)
+
+
+def _fallback_resolution(call_state: CallState) -> str:
+    return (
+        "Your complaint has been registered for action. "
+        f"Reference: SAH-{call_state.call_sid[-6:].upper()}. "
+        "Please keep your phone reachable; an officer will follow up if more details are needed."
+    )
+
+
+def _deterministic_response(
+    call_state: CallState,
+    analysis: CallAnalysis,
+    resolution: str | None = None,
+) -> str:
+    """Fast local/demo response when no live LLM key is configured."""
+
+    language = (analysis.language or call_state.language or "english").lower()
+    phase = call_state.current_phase
+    action_text = resolution or call_state.resolution or call_state.adapted_resolution
+
+    english = {
+        "queued": (
+            "All officers are busy, but I have placed you in a priority queue. "
+            "Press 1 for Police, 2 for Ambulance, or 3 for Fire Services."
+        ),
+        "handover": "I understand. I am connecting you to a human officer with your details now.",
+        "handover_pending": "I understand. I am connecting you to a human officer with your details now.",
+        "resolved": (
+            f"Done. {action_text or 'Your action has been registered.'} "
+            f"Reference: {call_state.complaint_reference_id or 'SAH-' + call_state.call_sid[-6:].upper()}."
+        ),
+        "clarifying": "I may have misunderstood. Please tell me only what was wrong or missing.",
+        "vachan_partial": "Thank you. Please tell me the missing or corrected detail so I can confirm again.",
+        "vachan_pending": call_state.vachan_prompt
+        or f"I understood this: {call_state.ai_summary or analysis.summary}. Is this correct?",
+        "default": (
+            f"I understood: {call_state.ai_summary or analysis.summary or 'your concern'}. "
+            f"{action_text or 'I am preparing the next step.'} Is this correct?"
+        ),
+    }
+    hindi = {
+        "queued": "सभी अधिकारी व्यस्त हैं, लेकिन मैंने आपको प्राथमिकता कतार में रखा है. पुलिस के लिए 1, एम्बुलेंस के लिए 2, फायर के लिए 3 दबाएं.",
+        "handover": "मैं आपको आपकी जानकारी के साथ मानव अधिकारी से जोड़ रहा हूँ.",
+        "handover_pending": "मैं आपको आपकी जानकारी के साथ मानव अधिकारी से जोड़ रहा हूँ.",
+        "resolved": f"हो गया. संदर्भ संख्या: {call_state.complaint_reference_id or 'SAH-' + call_state.call_sid[-6:].upper()}.",
+        "clarifying": "शायद मैंने गलत समझा. कृपया केवल सही जानकारी बताइए.",
+        "vachan_partial": "धन्यवाद. कृपया अधूरी या सही जानकारी बताइए ताकि मैं फिर पुष्टि कर सकूँ.",
+        "vachan_pending": call_state.vachan_prompt
+        or f"मैंने यह समझा: {call_state.ai_summary or analysis.summary}. क्या यह सही है?",
+        "default": f"मैंने समझा: {call_state.ai_summary or analysis.summary or 'आपकी समस्या'}. क्या यह सही है?",
+    }
+    kannada = {
+        "queued": "ಎಲ್ಲಾ ಅಧಿಕಾರಿಗಳು ಬ್ಯುಸಿಯಾಗಿದ್ದಾರೆ, ಆದರೆ ನಿಮ್ಮ ಕರೆಯನ್ನು ಆದ್ಯತಾ ಸಾಲಿನಲ್ಲಿ ಇಟ್ಟಿದ್ದೇನೆ. ಪೊಲೀಸ್‌ಗೆ 1, ಆಂಬ್ಯುಲೆನ್ಸ್‌ಗೆ 2, ಫೈರ್‌ಗೆ 3 ಒತ್ತಿರಿ.",
+        "handover": "ನಿಮ್ಮ ವಿವರಗಳೊಂದಿಗೆ ಮಾನವ ಅಧಿಕಾರಿಗೆ ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇನೆ.",
+        "handover_pending": "ನಿಮ್ಮ ವಿವರಗಳೊಂದಿಗೆ ಮಾನವ ಅಧಿಕಾರಿಗೆ ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇನೆ.",
+        "resolved": f"ಮುಗಿದಿದೆ. ಉಲ್ಲೇಖ ಸಂಖ್ಯೆ: {call_state.complaint_reference_id or 'SAH-' + call_state.call_sid[-6:].upper()}.",
+        "clarifying": "ನಾನು ತಪ್ಪಾಗಿ ಅರ್ಥ ಮಾಡಿಕೊಂಡಿರಬಹುದು. ದಯವಿಟ್ಟು ಸರಿಯಾದ ವಿವರವನ್ನು ಮಾತ್ರ ಹೇಳಿ.",
+        "vachan_partial": "ಧನ್ಯವಾದಗಳು. ಮತ್ತೆ ದೃಢೀಕರಿಸಲು ತಪ್ಪಿದ ಅಥವಾ ಸರಿಯಾದ ವಿವರವನ್ನು ಹೇಳಿ.",
+        "vachan_pending": call_state.vachan_prompt
+        or f"ನಾನು ಹೀಗೆ ಅರ್ಥ ಮಾಡಿಕೊಂಡಿದ್ದೇನೆ: {call_state.ai_summary or analysis.summary}. ಇದು ಸರಿಯೇ?",
+        "default": f"ನಾನು ಅರ್ಥ ಮಾಡಿಕೊಂಡಿದ್ದು: {call_state.ai_summary or analysis.summary or 'ನಿಮ್ಮ ಸಮಸ್ಯೆ'}. ಇದು ಸರಿಯೇ?",
+    }
+    templates = {"hindi": hindi, "kannada": kannada}.get(language, english)
+    return templates.get(phase, templates["default"])
 
 
 def _persist_call(call_state: CallState, analysis: CallAnalysis):

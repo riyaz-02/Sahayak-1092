@@ -2,7 +2,7 @@
 
 **Every Voice Heard. Every Call Resolved. Every Second Counts.**
 
-Sahayak 1092 is an AI-first voice-to-voice helpline platform for the 1092 emergency support flow. It answers immediately, understands the caller's language and situation, resolves routine high-confidence calls end-to-end, and transfers only true exception cases to the best available officer with full context.
+Sahayak 1092 is an AI-first voice-to-voice helpline platform for the 1092 emergency support flow. At its center is a bounded emergency operations agent: it observes caller input, reasons through safety policy, uses approved tools, confirms before final action, updates memory, and escalates only true exception cases to the best available officer with full context.
 
 The system is built for Indian public-service conditions: multilingual callers, dialect variation, emotional speech, high-volume surges, limited officer capacity, and the need for auditable decisions.
 
@@ -12,6 +12,7 @@ The system is built for Indian public-service conditions: multilingual callers, 
 - [What Sahayak Does](#what-sahayak-does)
 - [Core Call Flow](#core-call-flow)
 - [Architecture](#architecture)
+- [Agent Runtime](#agent-runtime)
 - [Repository Structure](#repository-structure)
 - [Tech Stack](#tech-stack)
 - [Quick Start](#quick-start)
@@ -123,9 +124,55 @@ flowchart LR
 
     Dashboard["Next.js Dashboard"] --> Proxy["Next.js API Proxy<br/>/api/sahayak/*"]
     Proxy --> API["FastAPI Backend"]
+    API --> Agent["Sahayak Agent Runtime<br/>observe / decide / act / remember"]
+    Agent --> Engine
     API --> Supabase
-    API --> Engine
 ```
+
+## Agent Runtime
+
+Sahayak is implemented as a **bounded AI agent**, not an unrestricted chatbot. The API, dashboard, and Twilio voice stream are channels into the same runtime:
+
+```text
+Channel input -> SahayakAgent -> approved tools -> decision result -> memory/audit trace
+```
+
+The runtime lives in `backend/agent/`.
+
+| Agent layer | File | Purpose |
+|---|---|---|
+| Runtime | `backend/agent/sahayak_agent.py` | Single entrypoint for text/API/voice turns |
+| Context | `backend/agent/context.py` | Agent input, tool, trace, and result schemas |
+| Tools | `backend/agent/tools.py` | Explicit tool registry and adapters to existing modules |
+| Policy | `backend/agent/policy.py` | Safety notes and policy explanation |
+| Memory | `backend/agent/memory.py` | Agent turn events and trace persistence |
+| Traces | `backend/agent/traces.py` | Human-readable observe/decide/act trace construction |
+
+The core workflow remains the same. The existing `decision_engine` still performs the proven Sahayak logic. The agent runtime wraps it so every turn now has:
+
+- a goal,
+- a channel,
+- an observed input,
+- approved tool calls,
+- final action,
+- final phase,
+- safety notes,
+- memory writes,
+- an auditable trace.
+
+Agent tools are intentionally bounded:
+
+- `load_call_memory`
+- `understand_caller`
+- `evaluate_safety_policy`
+- `search_resolved_cases`
+- `request_vachan_confirmation`
+- `register_complaint`
+- `route_to_officer`
+- `enqueue_priority_call`
+- `respond_to_caller`
+
+This is the right shape for an emergency/government system: the LLM can help interpret and respond, but deterministic policy and explicit tools control final action.
 
 ### Decision Architecture
 
@@ -237,6 +284,7 @@ erDiagram
 ```text
 .
 |-- backend/
+|   |-- agent/                      # Bounded Sahayak agent runtime and traces
 |   |-- app.py                       # ASGI entrypoint: backend.app:app
 |   |-- main.py                      # FastAPI app, webhooks, REST API
 |   |-- config.py                    # Typed environment settings
@@ -287,6 +335,7 @@ erDiagram
 | STT | Bhashini, Deepgram, Google/Gemini/OpenAI fallback paths |
 | TTS | Bhashini, Google/gTTS, Edge TTS, OpenAI fallback paths |
 | LLM analysis | OpenAI-compatible client, Gemini-compatible base URL support, deterministic fallback |
+| Agent runtime | Bounded `SahayakAgent` with explicit tools, safety notes, memory, and traces |
 | Embeddings | OpenAI-compatible embeddings or deterministic local embeddings |
 | Database | Supabase Postgres |
 | Vector DB | Supabase pgvector |
@@ -457,6 +506,7 @@ Use `TRANSFER_MODE=mock` for local demos. Use `TRANSFER_MODE=twilio` for real wa
 OPENAI_API_KEY=
 OPENAI_BASE_URL=
 LLM_MODEL=gpt-4o
+LLM_PROVIDER_TIMEOUT_SEC=8
 ANALYSIS_PROVIDER=auto
 
 BHASHINI_API_KEY=
@@ -676,7 +726,7 @@ npm --prefix dashboard audit --omit=dev
 Current verified project status:
 
 ```text
-Python tests: 48 passed
+Python tests: 50 passed
 Ruff: passed
 Next.js typecheck: passed
 Next.js build: passed
@@ -775,6 +825,8 @@ This keeps the backend API key server-side instead of exposing it to the browser
 | `GET` | `/api/call-transcript/{call_sid}` | Transcript for one call |
 | `GET` | `/api/call-events` | Audit events, optionally filtered by `call_sid` |
 | `GET` | `/api/agents` | Officer list |
+| `GET` | `/api/agent/tools` | Bounded Sahayak agent tool registry |
+| `GET` | `/api/agent/traces` | Recent agent turn traces, optionally filtered by `call_sid` |
 | `POST` | `/api/agent/toggle` | Toggle officer availability |
 | `POST` | `/api/calls/{call_sid}/corrections` | Store officer correction as audit event |
 | `POST` | `/api/handover/{call_sid}/accept` | Officer accepts warm handover |

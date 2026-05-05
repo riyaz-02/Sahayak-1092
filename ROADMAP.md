@@ -566,7 +566,34 @@ Make the system credible for government/emergency deployment.
 - [x] Logs avoid leaking full phone numbers by default.
 - [x] All API errors return safe JSON.
 
-## Phase 13: End-to-End Demo Scripts
+## Phase 13: Bounded AI Agent Runtime
+
+### Goal
+
+Make Sahayak feel and operate like a real AI agent codebase while preserving the existing tested workflow.
+
+### Tasks
+
+- [x] Add `backend/agent/` package.
+- [x] Add `SahayakAgent` runtime as the channel-facing entrypoint.
+- [x] Add agent context, tool, result, and trace schemas.
+- [x] Add explicit bounded tool registry.
+- [x] Add policy explanation and safety notes.
+- [x] Add memory/event persistence for agent turns.
+- [x] Route text API pipeline through the agent.
+- [x] Route Twilio voice turns through the agent.
+- [x] Add agent tools and trace APIs.
+- [x] Show agent traces in the dashboard.
+- [x] Add agent runtime tests.
+
+### Acceptance Criteria
+
+- [x] Core decision workflow remains unchanged.
+- [x] APIs and voice are channels into `SahayakAgent`.
+- [x] Each turn can expose observe/tool/action/safety trace.
+- [x] Existing tests continue to pass.
+
+## Phase 14: End-to-End Demo Scripts
 
 ### Goal
 
@@ -594,7 +621,7 @@ Prepare a competition-safe demo with backup paths.
 - [ ] At least one scenario works through phone call if Twilio is configured.
 - [ ] Demo can still run without paid providers using deterministic fallbacks.
 
-## Phase 14: Evaluation and Polish
+## Phase 15: Evaluation and Polish
 
 ### Goal
 
@@ -640,8 +667,9 @@ Show measurable impact and polish the submission.
 11. Phase 10: Queue, Surge IVR, and High-Help Alert
 12. Phase 11: Dashboard Upgrade
 13. Phase 12: Security and Production Hardening
-14. Phase 13: End-to-End Demo Scripts
-15. Phase 14: Evaluation and Polish
+14. Phase 13: Bounded AI Agent Runtime
+15. Phase 14: End-to-End Demo Scripts
+16. Phase 15: Evaluation and Polish
 
 ## Phase Completion Rule
 
@@ -655,10 +683,10 @@ Do not move to the next phase until:
 
 ## Immediate Next Step
 
-Start with Phase 9: Officer Routing and Warm Transfer.
+Start Phase 14: End-to-End Demo Scripts.
 
-1. Add handover context model.
-2. Expand routing score with urgency/specialty, language/dialect, wait time, and load breakdown.
-3. Add endpoint for officer accepting a handover.
-4. Add Twilio transfer/conference abstraction with mock mode.
-5. Show officer first-sentence suggestion and score breakdown.
+1. Add seeded demo scenarios.
+2. Add demo reset/seed endpoint.
+3. Add dashboard controls for scenario replay.
+4. Validate one phone-call path if Twilio/provider keys are configured.
+5. Keep deterministic fallback ready for competition demo safety.

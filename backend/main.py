@@ -38,12 +38,12 @@ from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 from twilio.rest import Client as TwilioClient
 
+from backend.agent import get_sahayak_agent
 from backend.api.health import build_health_payload
 from backend.config import get_settings
 from backend.media_stream import handle_media_stream
 from backend.decision_engine import (
     get_or_create_call,
-    process_caller_input,
 )
 from backend.intelligence.schemas import CallAnalysis
 from backend.intelligence.similarity import (
@@ -72,6 +72,7 @@ call_repository = get_call_repository()
 complaint_registry = get_complaint_registry()
 queue_manager = get_queue_manager()
 transfer_service = get_transfer_service()
+sahayak_agent = get_sahayak_agent()
 local_learned_cases: list[dict[str, Any]] = []
 
 BASE_URL = settings.base_url
@@ -433,17 +434,20 @@ async def test_pipeline(request: Request):
     if not text:
         raise HTTPException(status_code=400, detail="'text' is required")
 
-    # Set language on call state
-    call_state = get_or_create_call(call_sid)
-    call_state.language = language
-
-    result = await process_caller_input(call_sid, text)
+    result = await sahayak_agent.handle_text_turn(
+        call_sid=call_sid,
+        text=text,
+        language=language,
+        channel="api_test",
+        metadata={"endpoint": "/api/test-pipeline"},
+    )
 
     return JSONResponse({
         "response": result["response_text"],
         "action": result["action"],
         "analysis": result.get("analysis"),
         "similarity": result.get("similarity"),
+        "agent_trace": result.get("agent_trace"),
         "call_state": {
             "call_sid": call_sid,
             "language": result["call_state"]["language"],
@@ -475,6 +479,30 @@ async def test_pipeline(request: Request):
             "high_help_alert_at": result["call_state"].get("high_help_alert_at"),
         },
     })
+
+
+@app.get("/api/agent/tools")
+async def api_agent_tools():
+    """Return the bounded tool registry used by the Sahayak agent."""
+    return JSONResponse(
+        {
+            "agent": "sahayak_1092",
+            "agent_type": "bounded_emergency_operations_agent",
+            "tools": sahayak_agent.tool_specs(),
+        }
+    )
+
+
+@app.get("/api/agent/traces")
+async def api_agent_traces(call_sid: str | None = None, limit: int = 20):
+    """Return recent agent turn traces from the call-event audit log."""
+    events = call_repository.fetch_call_events(call_sid=call_sid, limit=max(limit * 5, limit))
+    traces = [
+        event
+        for event in events
+        if event.get("event_type") == "agent_turn_completed"
+    ][:limit]
+    return JSONResponse({"agent_traces": traces, "count": len(traces)})
 
 
 # ──────────────────────────────────────────────

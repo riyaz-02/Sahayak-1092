@@ -237,7 +237,7 @@ button {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
   margin-bottom: 24px;
 }
@@ -535,6 +535,27 @@ button {
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
+}
+
+.trace-summary,
+.trace-note {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.trace-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.trace-note {
+  display: grid;
+  gap: 5px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .toast {
