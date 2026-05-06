@@ -7,7 +7,9 @@ from backend.intelligence.embeddings import DeterministicEmbeddingProvider
 from backend.intelligence.schemas import CallAnalysis, CallPhase, CallState
 from backend.intelligence.similarity import (
     SimilarityService,
+    deterministic_seed_cases,
     generate_seed_case_embeddings,
+    seed_demo_vector_cases,
     urgency_band,
 )
 
@@ -17,8 +19,51 @@ async def test_seed_resolved_cases_receive_deterministic_embeddings() -> None:
     cases = await generate_seed_case_embeddings(DeterministicEmbeddingProvider())
 
     assert cases
+    assert len(cases) >= 40
     assert len(cases[0]["embedding"]) == 1536
     assert cases[0]["urgency_band"] == "medium"
+
+
+def test_competition_seed_dataset_is_normalized_for_similarity() -> None:
+    cases = deterministic_seed_cases()
+    categories = {case["category"] for case in cases}
+
+    assert len(cases) >= 40
+    assert "cyber" in categories
+    assert "domestic" in categories
+    assert "accident" in categories
+    assert "harassment" in categories
+    assert "civic" in categories
+    assert "cyber_fraud" not in categories
+    assert any(case["language"] == "kannada" for case in cases)
+    assert any(case["dialect"] == "kolkata-urban" for case in cases)
+
+
+@pytest.mark.asyncio
+async def test_seed_vector_cases_skips_existing_summaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.intelligence import similarity
+
+    inserted: list[dict] = []
+    first_case = deterministic_seed_cases()[0]
+
+    monkeypatch.setattr(
+        similarity.db,
+        "get_all_resolved_cases",
+        lambda limit=2000, include_embedding=False: [{"summary": first_case["summary"]}],
+    )
+
+    def fake_insert_resolved_case(**kwargs):
+        inserted.append(kwargs)
+        return {"id": f"case-{len(inserted)}", **kwargs}
+
+    monkeypatch.setattr(similarity.db, "insert_resolved_case", fake_insert_resolved_case)
+
+    result = await seed_demo_vector_cases(provider=DeterministicEmbeddingProvider())
+
+    assert result["attempted"] >= 40
+    assert result["skipped_existing"] == 1
+    assert result["inserted"] == result["attempted"] - 1
+    assert all(item["summary"] != first_case["summary"] for item in inserted)
 
 
 @pytest.mark.asyncio

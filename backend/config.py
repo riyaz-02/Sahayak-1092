@@ -72,19 +72,27 @@ class Settings:
     vector_search_limit: int = 10
     vector_db_match_threshold: float = 0.15
 
+    sarvam_api_key: str = ""
+    sarvam_base_url: str = "https://api.sarvam.ai"
+    sarvam_stt_model: str = "saaras:v3"
+    sarvam_stt_mode: str = "transcribe"
+    sarvam_tts_model: str = "bulbul:v3"
+    sarvam_tts_speaker: str = "shubh"
+    sarvam_tts_pace: float = 0.95
+    sarvam_tts_temperature: float = 0.35
     bhashini_api_key: str = ""
     bhashini_user_id: str = ""
     bhashini_pipeline_url: str = "https://dhruva-api.bhashini.gov.in/services/inference"
     deepgram_api_key: str = ""
     gemini_api_key: str = ""
     stt_provider_order: tuple[str, ...] = (
-        "bhashini",
+        "sarvam",
         "deepgram",
         "google",
         "openai_whisper",
     )
     tts_provider_order: tuple[str, ...] = (
-        "bhashini",
+        "sarvam",
         "google",
         "edge",
         "openai",
@@ -94,6 +102,7 @@ class Settings:
 
     supabase_url: str = ""
     supabase_key: str = ""
+    supabase_service_role_key: str = ""
     redis_url: str = ""
 
     validate_twilio_signatures: bool = False
@@ -130,7 +139,7 @@ class Settings:
 
     @property
     def supabase_configured(self) -> bool:
-        return bool(self.supabase_url and self.supabase_key)
+        return bool(self.supabase_url and (self.supabase_service_role_key or self.supabase_key))
 
     @property
     def effective_high_help_alert_timeout_sec(self) -> int:
@@ -164,6 +173,19 @@ def get_settings() -> Settings:
         embedding_dimension=_as_int(os.getenv("EMBEDDING_DIMENSION"), 1536),
         vector_search_limit=_as_int(os.getenv("VECTOR_SEARCH_LIMIT"), 10),
         vector_db_match_threshold=_as_float(os.getenv("VECTOR_DB_MATCH_THRESHOLD"), 0.15),
+        sarvam_api_key=(
+            os.getenv("SARVAM_API_KEY")
+            or os.getenv("SARVAMAI_API_KEY")
+            or os.getenv("SAVNAM_API_KEY")
+            or ""
+        ),
+        sarvam_base_url=os.getenv("SARVAM_BASE_URL", "https://api.sarvam.ai"),
+        sarvam_stt_model=os.getenv("SARVAM_STT_MODEL", "saaras:v3"),
+        sarvam_stt_mode=os.getenv("SARVAM_STT_MODE", "transcribe"),
+        sarvam_tts_model=os.getenv("SARVAM_TTS_MODEL", "bulbul:v3"),
+        sarvam_tts_speaker=os.getenv("SARVAM_TTS_SPEAKER", "shubh"),
+        sarvam_tts_pace=_as_float(os.getenv("SARVAM_TTS_PACE"), 0.95),
+        sarvam_tts_temperature=_as_float(os.getenv("SARVAM_TTS_TEMPERATURE"), 0.35),
         bhashini_api_key=os.getenv("BHASHINI_API_KEY", ""),
         bhashini_user_id=os.getenv("BHASHINI_USER_ID", ""),
         bhashini_pipeline_url=os.getenv(
@@ -174,11 +196,11 @@ def get_settings() -> Settings:
         gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
         stt_provider_order=_as_csv(
             os.getenv("STT_PROVIDER_ORDER"),
-            ("bhashini", "deepgram", "google", "openai_whisper"),
+            ("sarvam", "deepgram", "google", "openai_whisper"),
         ),
         tts_provider_order=_as_csv(
             os.getenv("TTS_PROVIDER_ORDER"),
-            ("bhashini", "google", "edge", "openai"),
+            ("sarvam", "google", "edge", "openai"),
         ),
         voice_provider_timeout_sec=_as_float(os.getenv("VOICE_PROVIDER_TIMEOUT_SEC"), 12.0),
         tts_phrase_cache_enabled=_as_bool(
@@ -186,7 +208,13 @@ def get_settings() -> Settings:
             True,
         ),
         supabase_url=os.getenv("SUPABASE_URL", ""),
-        supabase_key=os.getenv("SUPABASE_KEY", ""),
+        supabase_key=(
+            os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+            or os.getenv("SUPABASE_KEY")
+            or os.getenv("SUPABASE_ANON_KEY")
+            or ""
+        ),
+        supabase_service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
         redis_url=os.getenv("REDIS_URL", ""),
         validate_twilio_signatures=_as_bool(
             os.getenv("VALIDATE_TWILIO_SIGNATURES"),

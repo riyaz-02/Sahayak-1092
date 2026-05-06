@@ -10,6 +10,7 @@ import {
   Edit3,
   FileText,
   History,
+  KeyRound,
   Mic,
   Network,
   PhoneCall,
@@ -19,7 +20,7 @@ import {
   ShieldCheck,
   Users
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type AnyRecord = Record<string, any>;
 
@@ -54,6 +55,8 @@ type TabKey =
   | "test";
 
 const API_BASE = "/api/sahayak";
+const AUTO_REFRESH_MS = 15000;
+const DASHBOARD_KEY_STORAGE = "sahayak.dashboard.key";
 
 const emptyData: DashboardData = {
   health: null,
@@ -89,30 +92,75 @@ const categories = [
   "suspicious_activity",
   "medical",
   "fire",
-  "traffic"
+  "traffic",
+  "harassment",
+  "civic"
 ];
 
-async function apiGet<T>(path: string, fallback: T): Promise<T> {
+class DashboardAuthError extends Error {
+  constructor(message = "Dashboard access key required") {
+    super(message);
+    this.name = "DashboardAuthError";
+  }
+}
+
+function apiHeaders(dashboardKey = "") {
+  const headers: Record<string, string> = {};
+  if (dashboardKey) {
+    headers["x-sahayak-dashboard-key"] = dashboardKey;
+  }
+  return headers;
+}
+
+async function apiGet<T>(
+  path: string,
+  fallback: T,
+  options: { signal?: AbortSignal; dashboardKey?: string } = {}
+): Promise<T> {
   try {
-    const response = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
+    const response = await fetch(`${API_BASE}${path}`, {
+      cache: "no-store",
+      headers: apiHeaders(options.dashboardKey),
+      signal: options.signal
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new DashboardAuthError();
+    }
     if (!response.ok) {
       return fallback;
     }
     return (await response.json()) as T;
-  } catch {
+  } catch (error) {
+    if (error instanceof DashboardAuthError) {
+      throw error;
+    }
     return fallback;
   }
 }
 
-async function apiPost<T>(path: string, body: AnyRecord, fallback: T): Promise<T> {
+async function apiPost<T>(
+  path: string,
+  body: AnyRecord,
+  fallback: T,
+  dashboardKey = ""
+): Promise<T> {
   try {
     const response = await fetch(`${API_BASE}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...apiHeaders(dashboardKey)
+      },
       body: JSON.stringify(body)
     });
+    if (response.status === 401 || response.status === 403) {
+      throw new DashboardAuthError();
+    }
     return (await response.json()) as T;
-  } catch {
+  } catch (error) {
+    if (error instanceof DashboardAuthError) {
+      throw error;
+    }
     return fallback;
   }
 }
@@ -134,7 +182,13 @@ function statusTone(value?: string) {
   if (status.includes("alert") || status.includes("distress") || status.includes("failed")) {
     return "red";
   }
-  if (status.includes("resolved") || status.includes("available") || status.includes("ok")) {
+  if (
+    status.includes("resolved") ||
+    status.includes("available") ||
+    status.includes("ok") ||
+    status.includes("healthy") ||
+    status.includes("ready")
+  ) {
     return "green";
   }
   if (status.includes("handover") || status.includes("queue") || status.includes("waiting")) {
@@ -176,6 +230,12 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardData>(emptyData);
   const [tab, setTab] = useState<TabKey>("overview");
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState("");
+  const [authRequired, setAuthRequired] = useState(false);
+  const [authInput, setAuthInput] = useState("");
+  const [authError, setAuthError] = useState("");
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
   const [selectedCallSid, setSelectedCallSid] = useState("");
@@ -192,50 +252,157 @@ export default function DashboardPage() {
   const [testLanguage, setTestLanguage] = useState("english");
   const [testCallSid, setTestCallSid] = useState(`demo-${Date.now()}`);
   const [testResult, setTestResult] = useState<AnyRecord | null>(null);
+  const dataRef = useRef<DashboardData>(emptyData);
+  const dashboardKeyRef = useRef("");
+  const refreshControllerRef = useRef<AbortController | null>(null);
+  const hydratedCorrectionSidRef = useRef("");
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    const [
-      health,
-      active,
-      logs,
-      agents,
-      queue,
-      complaints,
-      cases,
-      events,
-      agentTraces
-    ] = await Promise.all([
-      apiGet<AnyRecord | null>("/health", null),
-      apiGet<AnyRecord>("/api/active-calls", { active_calls: [] }),
-      apiGet<AnyRecord>("/api/call-logs", { call_logs: [] }),
-      apiGet<AnyRecord>("/api/agents", { agents: [] }),
-      apiGet<AnyRecord>("/api/queue?include_inactive=true&limit=50", { queue: [] }),
-      apiGet<AnyRecord>("/api/complaints", { complaints: [] }),
-      apiGet<AnyRecord>("/api/resolved-cases", { cases: [] }),
-      apiGet<AnyRecord>("/api/call-events?limit=80", { events: [] }),
-      apiGet<AnyRecord>("/api/agent/traces?limit=20", { agent_traces: [] })
-    ]);
-
-    setData({
-      health,
-      activeCalls: active.active_calls || [],
-      callLogs: logs.call_logs || [],
-      agents: agents.agents || [],
-      queue: queue.queue || [],
-      complaints: complaints.complaints || [],
-      cases: cases.cases || [],
-      events: events.events || [],
-      agentTraces: agentTraces.agent_traces || []
-    });
-    setLoading(false);
+  useEffect(() => {
+    const storedKey = window.localStorage.getItem(DASHBOARD_KEY_STORAGE) || "";
+    dashboardKeyRef.current = storedKey;
+    setAuthInput(storedKey);
   }, []);
 
   useEffect(() => {
-    refresh();
-    const timer = window.setInterval(refresh, 8000);
-    return () => window.clearInterval(timer);
+    dataRef.current = data;
+  }, [data]);
+
+  const refresh = useCallback(async (mode: "initial" | "manual" | "background" = "manual") => {
+    if (refreshControllerRef.current) {
+      return;
+    }
+
+    const controller = new AbortController();
+    refreshControllerRef.current = controller;
+    const foregroundRefresh = mode !== "background";
+    setRefreshing(true);
+    if (foregroundRefresh) {
+      setLoading(true);
+    }
+
+    try {
+      const fallbackData = dataRef.current;
+      const dashboardKey = dashboardKeyRef.current;
+      const [
+        health,
+        active,
+        logs,
+        agents,
+        queue,
+        complaints,
+        cases,
+        events,
+        agentTraces
+      ] = await Promise.all([
+        apiGet<AnyRecord | null>("/health", null, { dashboardKey, signal: controller.signal }),
+        apiGet<AnyRecord>(
+          "/api/active-calls",
+          { active_calls: fallbackData.activeCalls },
+          { dashboardKey, signal: controller.signal }
+        ),
+        apiGet<AnyRecord>(
+          "/api/call-logs",
+          { call_logs: fallbackData.callLogs },
+          { dashboardKey, signal: controller.signal }
+        ),
+        apiGet<AnyRecord>(
+          "/api/agents",
+          { agents: fallbackData.agents },
+          { dashboardKey, signal: controller.signal }
+        ),
+        apiGet<AnyRecord>(
+          "/api/queue?include_inactive=true&limit=50",
+          { queue: fallbackData.queue },
+          { dashboardKey, signal: controller.signal }
+        ),
+        apiGet<AnyRecord>(
+          "/api/complaints",
+          { complaints: fallbackData.complaints },
+          { dashboardKey, signal: controller.signal }
+        ),
+        apiGet<AnyRecord>(
+          "/api/resolved-cases",
+          { cases: fallbackData.cases },
+          { dashboardKey, signal: controller.signal }
+        ),
+        apiGet<AnyRecord>(
+          "/api/call-events?limit=80",
+          { events: fallbackData.events },
+          { dashboardKey, signal: controller.signal }
+        ),
+        apiGet<AnyRecord>(
+          "/api/agent/traces?limit=20",
+          { agent_traces: fallbackData.agentTraces },
+          { dashboardKey, signal: controller.signal }
+        )
+      ]);
+
+      if (!controller.signal.aborted) {
+        setAuthRequired(false);
+        setAuthError("");
+        setData({
+          health,
+          activeCalls: active.active_calls || [],
+          callLogs: logs.call_logs || [],
+          agents: agents.agents || [],
+          queue: queue.queue || [],
+          complaints: complaints.complaints || [],
+          cases: cases.cases || [],
+          events: events.events || [],
+          agentTraces: agentTraces.agent_traces || []
+        });
+        setLastUpdated(new Intl.DateTimeFormat("en-IN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit"
+        }).format(new Date()));
+      }
+    } catch (refreshError) {
+      if (refreshError instanceof DashboardAuthError && !controller.signal.aborted) {
+        setAuthRequired(true);
+        setAuthError("Enter the dashboard access key from dashboard/.env.local.");
+      }
+    } finally {
+      if (refreshControllerRef.current === controller) {
+        refreshControllerRef.current = null;
+      }
+      if (!controller.signal.aborted) {
+        setRefreshing(false);
+        if (foregroundRefresh) {
+          setLoading(false);
+        }
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh("initial");
+    return () => {
+      const controller = refreshControllerRef.current;
+      controller?.abort();
+      if (controller) {
+        refreshControllerRef.current = null;
+      }
+    };
   }, [refresh]);
+
+  useEffect(() => {
+    if (!autoRefresh) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      refresh("background");
+    }, AUTO_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [autoRefresh, refresh]);
+
+  useEffect(() => {
+    if (!toast) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setToast(""), 4200);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   const selectedCall = useMemo(
     () => data.activeCalls.find((call) => call.call_sid === selectedCallSid),
@@ -246,6 +413,10 @@ export default function DashboardPage() {
     if (!selectedCall) {
       return;
     }
+    if (hydratedCorrectionSidRef.current === selectedCall.call_sid) {
+      return;
+    }
+    hydratedCorrectionSidRef.current = selectedCall.call_sid;
     setCorrection({
       category: selectedCall.category || "general",
       urgency: String(selectedCall.urgency ?? 0.5),
@@ -259,6 +430,7 @@ export default function DashboardPage() {
   const highHelpAlerts = data.queue.filter((entry) => entry.status === "high_help_alert");
   const availableAgents = data.agents.filter((agent) => agent.is_available);
   const handoverCalls = data.activeCalls.filter((call) => call.phase === "handover_pending");
+  const backendHealthy = ["ok", "healthy"].includes(String(data.health?.status || "").toLowerCase());
 
   const stats = [
     {
@@ -305,18 +477,55 @@ export default function DashboardPage() {
     }
   ];
 
+  function handleDashboardAuthRequired() {
+    dashboardKeyRef.current = "";
+    window.localStorage.removeItem(DASHBOARD_KEY_STORAGE);
+    setAuthRequired(true);
+    setAuthError("Dashboard key was rejected. Please enter the correct access key.");
+  }
+
+  function submitDashboardKey(event: FormEvent) {
+    event.preventDefault();
+    const key = authInput.trim();
+    if (!key) {
+      setAuthError("Dashboard access key is required.");
+      return;
+    }
+    dashboardKeyRef.current = key;
+    window.localStorage.setItem(DASHBOARD_KEY_STORAGE, key);
+    setAuthError("");
+    setAuthRequired(false);
+    refresh("manual");
+  }
+
   async function loadTranscript(callSid: string) {
-    const response = await apiGet<AnyRecord>(`/api/call-transcript/${callSid}`, { transcript: [] });
-    setTranscripts((current) => ({ ...current, [callSid]: response.transcript || [] }));
+    try {
+      const response = await apiGet<AnyRecord>(
+        `/api/call-transcript/${callSid}`,
+        { transcript: [] },
+        { dashboardKey: dashboardKeyRef.current }
+      );
+      setTranscripts((current) => ({ ...current, [callSid]: response.transcript || [] }));
+    } catch (authError) {
+      if (authError instanceof DashboardAuthError) {
+        handleDashboardAuthRequired();
+      }
+    }
   }
 
   async function toggleAgent(agent: AnyRecord) {
-    await apiPost("/api/agent/toggle", {
-      agent_id: agent.id,
-      available: !agent.is_available
-    }, {});
-    setToast(`${agent.name || "Officer"} is now ${agent.is_available ? "busy" : "available"}.`);
-    refresh();
+    try {
+      await apiPost("/api/agent/toggle", {
+        agent_id: agent.id,
+        available: !agent.is_available
+      }, {}, dashboardKeyRef.current);
+      setToast(`${agent.name || "Officer"} is now ${agent.is_available ? "busy" : "available"}.`);
+      refresh("background");
+    } catch (authError) {
+      if (authError instanceof DashboardAuthError) {
+        handleDashboardAuthRequired();
+      }
+    }
   }
 
   async function acceptHandover(call: AnyRecord) {
@@ -328,15 +537,23 @@ export default function DashboardPage() {
       setError("No routed officer is available for this handover.");
       return;
     }
-    const result = await apiPost<AnyRecord>(`/api/handover/${call.call_sid}/accept`, {
-      agent_id: selectedAgent,
-      notes: handoverNotes
-    }, {});
+    let result: AnyRecord;
+    try {
+      result = await apiPost<AnyRecord>(`/api/handover/${call.call_sid}/accept`, {
+        agent_id: selectedAgent,
+        notes: handoverNotes
+      }, {}, dashboardKeyRef.current);
+    } catch (authError) {
+      if (authError instanceof DashboardAuthError) {
+        handleDashboardAuthRequired();
+      }
+      return;
+    }
     if (result.status === "ok") {
       setToast("Warm handover accepted and transfer event recorded.");
       setError("");
       setHandoverNotes("");
-      refresh();
+      refresh("background");
     } else {
       setError(result.detail || result.error || "Handover failed.");
     }
@@ -348,15 +565,23 @@ export default function DashboardPage() {
       setError("Select an active call before applying corrections.");
       return;
     }
-    const result = await apiPost<AnyRecord>(`/api/calls/${selectedCall.call_sid}/corrections`, {
-      ...correction,
-      urgency: Number(correction.urgency),
-      corrected_by: "dashboard"
-    }, {});
+    let result: AnyRecord;
+    try {
+      result = await apiPost<AnyRecord>(`/api/calls/${selectedCall.call_sid}/corrections`, {
+        ...correction,
+        urgency: Number(correction.urgency),
+        corrected_by: "dashboard"
+      }, {}, dashboardKeyRef.current);
+    } catch (authError) {
+      if (authError instanceof DashboardAuthError) {
+        handleDashboardAuthRequired();
+      }
+      return;
+    }
     if (result.status === "ok") {
       setToast("Correction saved as an audit event.");
       setError("");
-      refresh();
+      refresh("background");
     } else {
       setError(result.detail || result.error || "Correction failed.");
     }
@@ -367,16 +592,24 @@ export default function DashboardPage() {
       setError("Select an active call before adding a knowledge case.");
       return;
     }
-    const result = await apiPost<AnyRecord>("/api/resolved-cases/from-call", {
-      call_sid: selectedCall.call_sid,
-      ...correction,
-      urgency: Number(correction.urgency),
-      tags: [correction.category, selectedCall.language || "english", "dashboard_corrected"]
-    }, {});
+    let result: AnyRecord;
+    try {
+      result = await apiPost<AnyRecord>("/api/resolved-cases/from-call", {
+        call_sid: selectedCall.call_sid,
+        ...correction,
+        urgency: Number(correction.urgency),
+        tags: [correction.category, selectedCall.language || "english", "dashboard_corrected"]
+      }, {}, dashboardKeyRef.current);
+    } catch (authError) {
+      if (authError instanceof DashboardAuthError) {
+        handleDashboardAuthRequired();
+      }
+      return;
+    }
     if (result.status === "ok") {
       setToast(`Knowledge case added via ${result.source}.`);
       setError("");
-      refresh();
+      refresh("background");
     } else {
       setError(result.detail || result.error || "Could not add knowledge case.");
     }
@@ -384,14 +617,33 @@ export default function DashboardPage() {
 
   async function runTestPipeline(event: FormEvent) {
     event.preventDefault();
-    const result = await apiPost<AnyRecord>("/api/test-pipeline", {
-      call_sid: testCallSid,
-      text: testText,
-      language: testLanguage
-    }, {});
+    let result: AnyRecord;
+    try {
+      result = await apiPost<AnyRecord>("/api/test-pipeline", {
+        call_sid: testCallSid,
+        text: testText,
+        language: testLanguage
+      }, {}, dashboardKeyRef.current);
+    } catch (authError) {
+      if (authError instanceof DashboardAuthError) {
+        handleDashboardAuthRequired();
+      }
+      return;
+    }
     setTestResult(result);
     setToast("Test pipeline response received.");
-    refresh();
+    refresh("background");
+  }
+
+  if (authRequired) {
+    return (
+      <DashboardLogin
+        value={authInput}
+        onChange={setAuthInput}
+        onSubmit={submitDashboardKey}
+        error={authError}
+      />
+    );
   }
 
   return (
@@ -407,12 +659,21 @@ export default function DashboardPage() {
           </div>
         </div>
         <div className="top-actions">
-          <span className="status-pill">
+          <span className={`status-pill ${backendHealthy ? "" : "offline"}`}>
             <span className="live-dot" />
             {data.health?.status || "offline"}
           </span>
-          <button className="btn primary" onClick={refresh} disabled={loading}>
-            <RefreshCw size={16} />
+          {lastUpdated && <span className="mono-pill">Updated {lastUpdated}</span>}
+          <button
+            className={`btn ghost ${autoRefresh ? "toggle-on" : ""}`}
+            onClick={() => setAutoRefresh((current) => !current)}
+            type="button"
+          >
+            <Radio size={16} />
+            {autoRefresh ? "Live on" : "Live paused"}
+          </button>
+          <button className="btn primary" onClick={() => refresh("manual")} disabled={refreshing}>
+            <RefreshCw className={loading ? "spin" : ""} size={16} />
             {loading ? "Refreshing" : "Refresh"}
           </button>
         </div>
@@ -535,6 +796,54 @@ export default function DashboardPage() {
           <HealthPanel health={data.health} />
           <AuditPanel events={data.events.slice(0, 6)} compact />
         </aside>
+      </section>
+    </main>
+  );
+}
+
+function DashboardLogin({
+  value,
+  onChange,
+  onSubmit,
+  error
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: (event: FormEvent) => void;
+  error: string;
+}) {
+  return (
+    <main className="auth-shell">
+      <section className="auth-panel">
+        <div className="brand-mark">
+          <KeyRound size={22} />
+        </div>
+        <div>
+          <div className="section-kicker">Protected command center</div>
+          <h1 className="auth-title">Enter dashboard access key.</h1>
+          <p className="section-copy">
+            The backend is protected. Use the value from `SAHAYAK_DASHBOARD_API_KEY` in
+            `dashboard/.env.local` to unlock this browser session.
+          </p>
+        </div>
+        <form className="form-grid auth-form" onSubmit={onSubmit}>
+          <label className="field wide">
+            <span className="field-label">Dashboard key</span>
+            <input
+              className="input mono"
+              type="password"
+              value={value}
+              onChange={(event) => onChange(event.target.value)}
+              placeholder="Paste dashboard access key"
+              autoComplete="current-password"
+            />
+          </label>
+          {error && <div className="toast error wide">{error}</div>}
+          <button className="btn primary wide">
+            <ShieldCheck size={15} />
+            Unlock dashboard
+          </button>
+        </form>
       </section>
     </main>
   );
@@ -984,6 +1293,26 @@ function AgentTracePanel({ traces }: { traces: AnyRecord[] }) {
 
 function HealthPanel({ health }: { health: AnyRecord | null }) {
   const persistence = health?.persistence || {};
+  const voice = health?.voice || {};
+  const supabase = persistence.supabase || {};
+  const vectorAvailable = persistence.vector_db?.available;
+  const redis = persistence.redis || {};
+  const supabaseLabel = !supabase.configured
+    ? "local"
+    : supabase.available === false
+      ? "blocked"
+      : supabase.key_role === "anon"
+        ? "anon key"
+        : "configured";
+  const redisLabel = redis.available ? "available" : redis.configured ? "unavailable" : "local";
+  const vectorLabel =
+    vectorAvailable === true
+      ? "ready"
+      : vectorAvailable === "not_probed"
+        ? "not probed"
+        : persistence.vector_db?.configured
+          ? "configured"
+          : "local";
   return (
     <section className="panel">
       <div className="section-header">
@@ -995,9 +1324,11 @@ function HealthPanel({ health }: { health: AnyRecord | null }) {
       </div>
       <div className="mini-grid">
         <Mini label="Active" value={String(health?.active_calls || 0)} />
-        <Mini label="Supabase" value={String(persistence.supabase_configured || false)} />
-        <Mini label="Redis" value={String(persistence.redis?.available || false)} />
-        <Mini label="Vector" value={String(persistence.vector_db?.available || false)} />
+        <Mini label="Current STT" value={voice.stt?.provider || "none"} />
+        <Mini label="Current TTS" value={voice.tts?.provider || "none"} />
+        <Mini label="Supabase" value={supabaseLabel} />
+        <Mini label="Redis" value={redisLabel} />
+        <Mini label="Vector" value={vectorLabel} />
       </div>
     </section>
   );

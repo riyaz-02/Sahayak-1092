@@ -37,6 +37,8 @@ SUPPORTED_CATEGORIES = {
     "medical",
     "fire",
     "traffic",
+    "harassment",
+    "civic",
     "general",
 }
 
@@ -136,7 +138,9 @@ class CallAnalysis(BaseModel):
             "mobile_theft": "theft",
             "robbery": "theft",
             "lost_property": "theft",
+            "cyber_fraud": "cyber",
             "domestic_violence": "domestic",
+            "road_accident": "accident",
             "medical_emergency": "medical",
             "suspicious": "suspicious_activity",
         }

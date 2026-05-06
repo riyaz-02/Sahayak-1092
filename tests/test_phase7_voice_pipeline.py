@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from backend.config import Settings
+from backend.api.health import build_voice_provider_status
 from backend.voice.audio_codec import pcm16_to_mulaw
 from backend.voice.stt import ordered_stt_providers, transcribe_audio_with_fallback
 from backend.voice.tts import (
@@ -145,3 +146,23 @@ def test_configured_provider_order_is_used_for_voice_cascades() -> None:
         "edge",
         "google",
     ]
+
+
+def test_sarvam_can_be_selected_as_primary_voice_provider() -> None:
+    settings = Settings(
+        sarvam_api_key="sarvam_test_key",
+        stt_provider_order=("sarvam", "deepgram"),
+        tts_provider_order=("sarvam", "edge"),
+    )
+
+    assert [provider.name for provider in ordered_stt_providers(settings)] == [
+        "sarvam",
+        "deepgram",
+    ]
+    assert [provider.name for provider in ordered_tts_providers(settings)] == [
+        "sarvam",
+        "edge",
+    ]
+    status = build_voice_provider_status(settings)
+    assert status["stt"] == {"provider": "sarvam", "configured": True}
+    assert status["tts"] == {"provider": "sarvam", "configured": True}

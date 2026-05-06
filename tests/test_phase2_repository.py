@@ -32,6 +32,39 @@ def test_repository_uses_local_fallback_without_supabase_or_redis() -> None:
     assert repo.fetch_call_events("phase2-local-1")[0]["event_type"] == "analysis_completed"
 
 
+def test_repository_supabase_update_payload_matches_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.persistence import repository
+
+    captured: dict = {}
+    repo = CallStateRepository(
+        Settings(
+            supabase_url="https://example.supabase.co",
+            supabase_key="service-role-test",
+            redis_url="",
+        )
+    )
+    state = CallState(call_sid="phase2-supabase-payload", caller_number="+919999999999")
+    analysis = CallAnalysis(category="theft", summary="Phone theft", confidence=0.91)
+
+    monkeypatch.setattr(repository.db, "create_call_log", lambda *args, **kwargs: {})
+
+    def fake_update_call_log(call_sid: str, **fields):
+        captured["call_sid"] = call_sid
+        captured["fields"] = fields
+        return {"call_sid": call_sid}
+
+    monkeypatch.setattr(repository.db, "update_call_log", fake_update_call_log)
+
+    repo.create_call_state(state)
+    state.ai_summary = "Phone theft"
+    repo.update_call_state(state, analysis=analysis)
+
+    assert captured["call_sid"] == "phase2-supabase-payload"
+    assert "category" not in captured["fields"]
+    assert captured["fields"]["confidence"] == 0.91
+    assert captured["fields"]["ai_summary"] == "Phone theft"
+
+
 @pytest.mark.asyncio
 async def test_text_pipeline_creates_call_record_and_audit_events(monkeypatch: pytest.MonkeyPatch) -> None:
     from backend import decision_engine

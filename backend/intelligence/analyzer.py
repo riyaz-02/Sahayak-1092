@@ -195,6 +195,31 @@ class DeterministicAnalyzer:
             "ವಂಚನೆ",
             "ಸೈಬರ್",
         },
+        "harassment": {
+            "harassment",
+            "harassed",
+            "eve teasing",
+            "stalking",
+            "molested",
+            "crowded bus",
+            "छेड़छाड़",
+            "पीछा कर",
+            "ಹಿಂಸೆ",
+            "ಕಿರುಕುಳ",
+        },
+        "civic": {
+            "waterlogging",
+            "flooded street",
+            "street light",
+            "municipal",
+            "drainage",
+            "construction noise",
+            "infrastructure",
+            "जलभराव",
+            "नगर निगम",
+            "ನೀರು ನಿಂತಿದೆ",
+            "ನಗರಪಾಲಿಕೆ",
+        },
         "noise": {
             "noise",
             "loud music",
@@ -474,9 +499,9 @@ class DeterministicAnalyzer:
             return 0.92
         if caller_wants_human:
             return 0.65
-        if category in {"theft", "cyber", "suspicious_activity"}:
+        if category in {"theft", "cyber", "suspicious_activity", "harassment"}:
             return 0.62
-        if category in {"traffic", "noise"}:
+        if category in {"traffic", "noise", "civic"}:
             return 0.42
         return 0.5
 
@@ -526,6 +551,8 @@ class DeterministicAnalyzer:
             "medical": "Caller reports a medical emergency.",
             "fire": "Caller reports a fire emergency.",
             "traffic": "Caller reports a traffic issue.",
+            "harassment": "Caller reports harassment or public safety concern.",
+            "civic": "Caller reports a civic or municipal support issue.",
         }
         if category in category_summaries:
             return category_summaries[category]

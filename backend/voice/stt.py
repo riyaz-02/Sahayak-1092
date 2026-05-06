@@ -27,6 +27,26 @@ LANGUAGE_TO_BHASHINI = {
     "en": "en",
 }
 
+LANGUAGE_TO_SARVAM = {
+    "kannada": "kn-IN",
+    "hindi": "hi-IN",
+    "english": "en-IN",
+    "telugu": "te-IN",
+    "tamil": "ta-IN",
+    "urdu": "ur-IN",
+    "bengali": "bn-IN",
+    "malayalam": "ml-IN",
+    "marathi": "mr-IN",
+    "odia": "od-IN",
+    "punjabi": "pa-IN",
+    "gujarati": "gu-IN",
+    "kn": "kn-IN",
+    "hi": "hi-IN",
+    "en": "en-IN",
+    "auto": "unknown",
+    "unknown": "unknown",
+}
+
 LANGUAGE_TO_DEEPGRAM = {
     "kannada": "kn",
     "hindi": "hi",
@@ -68,6 +88,19 @@ def _timed_ms(started_at: float) -> float:
 
 def _stt_name(name: str) -> str:
     return name.strip().lower().replace("-", "_")
+
+
+def _resample_pcm16(
+    pcm_bytes: bytes,
+    source_rate: int = 8000,
+    target_rate: int = 16000,
+) -> bytes:
+    if source_rate == target_rate:
+        return pcm_bytes
+    import audioop
+
+    converted, _ = audioop.ratecv(pcm_bytes, 2, 1, source_rate, target_rate, None)
+    return converted
 
 
 @dataclass(frozen=True)
@@ -123,6 +156,45 @@ class STTProvider(Protocol):
 
     async def transcribe(self, audio_bytes: bytes, language: str) -> str | None:
         """Transcribe audio bytes into text."""
+
+
+@dataclass
+class SarvamSTTProvider:
+    """Sarvam Saaras/Saarika ASR provider for Indian-language helpline calls."""
+
+    settings: Settings
+    name: str = "sarvam"
+
+    def is_configured(self) -> bool:
+        return is_valid_key(self.settings.sarvam_api_key) and bool(self.settings.sarvam_base_url)
+
+    async def transcribe(self, audio_bytes: bytes, language: str) -> str | None:
+        # Sarvam works best with 16kHz WAV. Twilio gives us 8kHz PCM16 after
+        # mu-law decoding, so resample before upload.
+        pcm_16k = _resample_pcm16(audio_bytes, source_rate=8000, target_rate=16000)
+        wav_data = create_wav_header(pcm_16k, sample_rate=16000) + pcm_16k
+        language_code = LANGUAGE_TO_SARVAM.get(_language_key(language), "unknown")
+        headers = {"api-subscription-key": self.settings.sarvam_api_key}
+        data = {
+            "model": self.settings.sarvam_stt_model,
+            "language_code": language_code,
+        }
+        if self.settings.sarvam_stt_model == "saaras:v3" and self.settings.sarvam_stt_mode:
+            data["mode"] = self.settings.sarvam_stt_mode
+        files = {"file": ("caller.wav", wav_data, "audio/wav")}
+
+        async with httpx.AsyncClient(timeout=self.settings.voice_provider_timeout_sec) as client:
+            response = await client.post(
+                f"{self.settings.sarvam_base_url.rstrip('/')}/speech-to-text",
+                data=data,
+                files=files,
+                headers=headers,
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        transcript = str(payload.get("transcript") or "").strip()
+        return transcript or None
 
 
 @dataclass
@@ -289,6 +361,7 @@ def build_stt_providers(settings: Settings | None = None) -> dict[str, STTProvid
 
     active_settings = settings or get_settings()
     providers: list[STTProvider] = [
+        SarvamSTTProvider(active_settings),
         BhashiniSTTProvider(active_settings),
         DeepgramSTTProvider(active_settings),
         GoogleCloudSTTProvider(active_settings),

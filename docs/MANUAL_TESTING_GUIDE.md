@@ -562,9 +562,9 @@ Dashboard should continue working because the Next.js proxy sends the key.
 | `/api/*` returns 401 | `DASHBOARD_AUTH_REQUIRED=true` but key missing | Set `SAHAYAK_DASHBOARD_API_KEY` |
 | Twilio call does not connect | `BASE_URL` not public or webhook wrong | Use ngrok HTTPS URL and update Twilio webhook |
 | Twilio signature fails | `BASE_URL` mismatch or ngrok changed | Update `.env`, restart backend, update Twilio |
-| No Supabase records | Supabase env missing or schema not applied | Run `models.sql`, check `SUPABASE_URL` and `SUPABASE_KEY` |
+| No Supabase records | Env/schema/RLS issue | Run `models.sql`, set backend `SUPABASE_SERVICE_ROLE_KEY`, then run `make PYTHON=.venv/bin/python diagnose-supabase` |
 | Vector search weak | Deterministic embeddings or no seeded cases | Seed cases and use provider embeddings for production |
-| Voice response slow | Provider key missing or timeout fallback | Configure Bhashini/Deepgram/TTS providers |
+| Voice response slow | Provider key missing or timeout fallback | Configure Sarvam/Deepgram/TTS providers |
 | Queue not showing | Agents still available or call did not trigger handover | Toggle agents unavailable and trigger human/urgent call |
 
 ## Final Manual Testing Checklist

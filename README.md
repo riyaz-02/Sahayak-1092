@@ -98,7 +98,7 @@ flowchart LR
     Citizen["Citizen Phone Call"] --> Bridge["Telephony Bridge<br/>Twilio / Exotel / SIP"]
     Bridge --> Media["Media Stream WebSocket<br/>backend.media_stream"]
 
-    Media --> STT["Streaming STT Cascade<br/>Bhashini / Deepgram / Google / Whisper"]
+    Media --> STT["Streaming STT Cascade<br/>Sarvam / Deepgram / Google / Whisper"]
     STT --> Engine["Decision Engine<br/>backend.decision_engine"]
 
     Engine --> Analyzer["Language, Dialect,<br/>Sentiment, Urgency, Intent"]
@@ -118,7 +118,7 @@ flowchart LR
     Queue --> Transfer
     Transfer --> Officer["Human Officer"]
 
-    Engine --> TTS["TTS Cascade<br/>Bhashini / Google / Edge / OpenAI"]
+    Engine --> TTS["TTS Cascade<br/>Sarvam / Google / Edge / OpenAI"]
     TTS --> Media
     Media --> Citizen
 
@@ -332,8 +332,8 @@ erDiagram
 | Backend API | FastAPI, Uvicorn |
 | Voice stream | Twilio Media Streams WebSocket |
 | Telephony | Twilio today, designed for Exotel/SIP adapter support |
-| STT | Bhashini, Deepgram, Google/Gemini/OpenAI fallback paths |
-| TTS | Bhashini, Google/gTTS, Edge TTS, OpenAI fallback paths |
+| STT | Sarvam AI, Deepgram, Google/Gemini/OpenAI Whisper fallback paths |
+| TTS | Sarvam AI, Google/gTTS, Edge TTS, OpenAI fallback paths |
 | LLM analysis | OpenAI-compatible client, Gemini-compatible base URL support, deterministic fallback |
 | Agent runtime | Bounded `SahayakAgent` with explicit tools, safety notes, memory, and traces |
 | Embeddings | OpenAI-compatible embeddings or deterministic local embeddings |
@@ -509,14 +509,24 @@ LLM_MODEL=gpt-4o
 LLM_PROVIDER_TIMEOUT_SEC=8
 ANALYSIS_PROVIDER=auto
 
+SARVAM_API_KEY=
+SARVAM_BASE_URL=https://api.sarvam.ai
+SARVAM_STT_MODEL=saaras:v3
+SARVAM_STT_MODE=transcribe
+SARVAM_TTS_MODEL=bulbul:v3
+SARVAM_TTS_SPEAKER=shubh
+SARVAM_TTS_PACE=0.95
+SARVAM_TTS_TEMPERATURE=0.35
+
+# Optional legacy fallback
 BHASHINI_API_KEY=
 BHASHINI_USER_ID=
 BHASHINI_PIPELINE_URL=https://dhruva-api.bhashini.gov.in/services/inference
 
 DEEPGRAM_API_KEY=
 GEMINI_API_KEY=
-STT_PROVIDER_ORDER=bhashini,deepgram,google,openai_whisper
-TTS_PROVIDER_ORDER=bhashini,google,edge,openai
+STT_PROVIDER_ORDER=sarvam,deepgram,google,openai_whisper
+TTS_PROVIDER_ORDER=sarvam,google,edge,openai
 VOICE_PROVIDER_TIMEOUT_SEC=12
 TTS_PHRASE_CACHE_ENABLED=true
 ```
@@ -533,6 +543,7 @@ LLM_MODEL=gemini-1.5-flash
 
 ```env
 SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
 SUPABASE_KEY=
 REDIS_URL=
 
@@ -627,16 +638,30 @@ backend/persistence/models.sql
 
 ```env
 SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your-supabase-key
+SUPABASE_SERVICE_ROLE_KEY=your-backend-service-role-key
+SUPABASE_KEY=your-anon-or-legacy-key
 ```
 
-5. Seed demo resolved cases:
+Use the service-role key only on the FastAPI backend. If you put only the anon key in `SUPABASE_KEY` while Row Level Security is enabled, Supabase can reject inserts into tables such as `call_logs`, `call_events`, and `complaints`.
+
+5. Verify database read/write access:
+
+```bash
+make PYTHON=.venv/bin/python diagnose-supabase
+```
+
+6. Seed demo resolved cases:
 
 ```bash
 make PYTHON=.venv/bin/python seed-vector-cases
 ```
 
-6. Backfill embeddings:
+This seeds the competition-ready resolved-case dataset in `backend/intelligence/seed_cases.py`.
+It covers theft, cyber fraud, domestic safety, suspicious activity, missing people, accidents,
+fire, medical, harassment, and civic-support cases across English, Hindi, and Kannada. The
+command skips already-present summaries, so it is safe to run more than once.
+
+7. Backfill embeddings:
 
 ```bash
 make PYTHON=.venv/bin/python backfill-vector-embeddings
@@ -875,7 +900,8 @@ BASE_URL=https://your-backend-domain.com
 CORS_ORIGINS=https://your-dashboard-domain.com
 
 SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your-backend-supabase-key
+SUPABASE_SERVICE_ROLE_KEY=your-backend-service-role-key
+SUPABASE_KEY=your-anon-or-legacy-key
 REDIS_URL=your-redis-url
 
 TWILIO_ACCOUNT_SID=your_twilio_sid
@@ -898,8 +924,9 @@ EMBEDDING_PROVIDER=openai
 EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_DIMENSION=1536
 
-BHASHINI_API_KEY=your_bhashini_key
-BHASHINI_USER_ID=your_bhashini_user_id
+SARVAM_API_KEY=your_sarvam_key
+SARVAM_STT_MODEL=saaras:v3
+SARVAM_TTS_MODEL=bulbul:v3
 DEEPGRAM_API_KEY=your_deepgram_key
 ```
 

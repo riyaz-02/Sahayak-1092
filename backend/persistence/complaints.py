@@ -215,14 +215,15 @@ class ComplaintRegistry:
         with self._lock:
             self._timelines.setdefault(reference_id, []).append(dict(event))
 
-        try:
-            db.insert_complaint_timeline_event(
-                reference_id=reference_id,
-                event_type=event_type,
-                payload=payload or {},
-            )
-        except Exception:
-            pass
+        if self.settings.supabase_configured:
+            try:
+                db.insert_complaint_timeline_event(
+                    reference_id=reference_id,
+                    event_type=event_type,
+                    payload=payload or {},
+                )
+            except Exception:
+                pass
         return dict(event)
 
     def list_complaints(self, limit: int = 50, call_sid: str | None = None) -> list[dict[str, Any]]:

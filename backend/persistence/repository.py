@@ -170,6 +170,7 @@ class CallStateRepository:
         return {
             "local_fallback": True,
             "supabase_configured": self.settings.supabase_configured,
+            "supabase": db.supabase_health(probe=False),
             "vector_db": db.vector_db_health(
                 embedding_dimension=self.settings.embedding_dimension,
                 probe=False,
@@ -220,7 +221,7 @@ class CallStateRepository:
         if self._redis:
             self._safe_redis_set(call_state)
 
-        if not existing:
+        if not existing and self.settings.supabase_configured:
             try:
                 db.create_call_log(call_state.call_sid, call_state.caller_number)
             except Exception:
@@ -320,7 +321,8 @@ class CallStateRepository:
                         "confidence": analysis.confidence,
                     }
                 )
-            db.update_call_log(call_sid=call_state.call_sid, **fields)
+            if self.settings.supabase_configured:
+                db.update_call_log(call_sid=call_state.call_sid, **fields)
         except Exception:
             pass
 
@@ -377,10 +379,11 @@ class CallStateRepository:
         with self._lock:
             self._events.setdefault(call_sid, []).append(copy.deepcopy(event))
 
-        try:
-            db.insert_call_event(event)
-        except Exception:
-            pass
+        if self.settings.supabase_configured:
+            try:
+                db.insert_call_event(event)
+            except Exception:
+                pass
 
         return copy.deepcopy(event)
 

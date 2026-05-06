@@ -48,7 +48,7 @@ Dashboard npm audit: 0 vulnerabilities
 | High-Help Alert | Complete foundation | Logic exists. Needs strong demo scenario and production escalation policy. |
 | Continuous learning from human cases | Partially complete | Corrections and add-to-knowledge endpoints exist. Needs quality gate, reviewer approval, and analytics. |
 | Rule-based + ML hybrid auditability | Strong foundation | Safety rules, events, logs, and structured outputs exist. Needs explicit audit replay screen for a winning demo. |
-| Bhashini-first Indian language readiness | Configured but not fully proven | Env/config/provider cascade exists. Needs real key testing and latency measurement. |
+| Sarvam-first Indian language readiness | Configured but not fully proven | Env/config/provider cascade exists. Needs real key testing and latency measurement. |
 | Production security | Phase 12 complete foundation | Needs persistent/distributed rate limit, full auth, RLS, deployment hardening, and monitoring. |
 
 ## What Is Missing Right Now
@@ -61,7 +61,8 @@ Current provider paths are configured, but live quality depends on real credenti
 
 Missing:
 
-- Real Bhashini STT/TTS validation.
+- Real Sarvam STT/TTS validation.
+- Optional Bhashini fallback validation if government credentials become available.
 - Real Deepgram fallback validation.
 - Real Gemini/OpenAI-compatible LLM response quality testing.
 - Real embedding provider quality comparison.

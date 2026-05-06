@@ -31,6 +31,23 @@ LANGUAGE_TO_BHASHINI = {
     "en": "en",
 }
 
+LANGUAGE_TO_SARVAM = {
+    "kannada": "kn-IN",
+    "hindi": "hi-IN",
+    "english": "en-IN",
+    "telugu": "te-IN",
+    "tamil": "ta-IN",
+    "bengali": "bn-IN",
+    "malayalam": "ml-IN",
+    "marathi": "mr-IN",
+    "odia": "od-IN",
+    "punjabi": "pa-IN",
+    "gujarati": "gu-IN",
+    "kn": "kn-IN",
+    "hi": "hi-IN",
+    "en": "en-IN",
+}
+
 GOOGLE_VOICES = {
     "kannada": ("kn-IN", "kn-IN-Wavenet-A"),
     "hindi": ("hi-IN", "hi-IN-Wavenet-A"),
@@ -218,6 +235,48 @@ class TTSProvider(Protocol):
 
 
 @dataclass
+class SarvamTTSProvider:
+    """Sarvam Bulbul TTS provider for natural Indian-language responses."""
+
+    settings: Settings
+    name: str = "sarvam"
+
+    def is_configured(self) -> bool:
+        return is_valid_key(self.settings.sarvam_api_key) and bool(self.settings.sarvam_base_url)
+
+    async def synthesize(self, text: str, language: str) -> bytes | None:
+        language_code = LANGUAGE_TO_SARVAM.get(_language_key(language), "en-IN")
+        payload = {
+            "text": text[:2500],
+            "target_language_code": language_code,
+            "model": self.settings.sarvam_tts_model,
+            "speaker": self.settings.sarvam_tts_speaker,
+            "speech_sample_rate": 8000,
+            "output_audio_codec": "wav",
+        }
+        if self.settings.sarvam_tts_model == "bulbul:v3":
+            payload["pace"] = self.settings.sarvam_tts_pace
+            payload["temperature"] = self.settings.sarvam_tts_temperature
+
+        async with httpx.AsyncClient(timeout=self.settings.voice_provider_timeout_sec) as client:
+            response = await client.post(
+                f"{self.settings.sarvam_base_url.rstrip('/')}/text-to-speech",
+                json=payload,
+                headers={
+                    "api-subscription-key": self.settings.sarvam_api_key,
+                    "Content-Type": "application/json",
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        audios = data.get("audios") or []
+        if not audios:
+            return None
+        return _wav_to_pcm16(base64.b64decode(audios[0]))
+
+
+@dataclass
 class BhashiniTTSProvider:
     """Bhashini/Dhruva TTS provider for Indian-language responses."""
 
@@ -397,6 +456,7 @@ def build_tts_providers(settings: Settings | None = None) -> dict[str, TTSProvid
 
     active_settings = settings or get_settings()
     providers: list[TTSProvider] = [
+        SarvamTTSProvider(active_settings),
         BhashiniTTSProvider(active_settings),
         GoogleCloudTTSProvider(active_settings),
         EdgeTTSProvider(active_settings),

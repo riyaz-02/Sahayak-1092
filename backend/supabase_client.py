@@ -8,29 +8,171 @@ Schema + helper functions for:
   • complaints       – registered complaints / actions
 """
 
+import base64
 import os
 import json
 import datetime as dt
-from typing import Optional
+from typing import Any, Optional
+from uuid import uuid4
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
+from backend.intelligence.seed_cases import resolved_case_seed_data
+
 load_dotenv()
 
-SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
+SUPABASE_URL: str = ""
+SUPABASE_KEY: str = ""
+SUPABASE_KEY_SOURCE: str = "missing"
 
 _client: Optional[Client] = None
+_last_error: dict[str, str] | None = None
+
+
+def _read_supabase_env() -> tuple[str, str, str]:
+    load_dotenv()
+    url = os.getenv("SUPABASE_URL", "").strip()
+    candidates = (
+        ("service_role", os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()),
+        ("supabase_key", os.getenv("SUPABASE_KEY", "").strip()),
+        ("anon", os.getenv("SUPABASE_ANON_KEY", "").strip()),
+    )
+    for source, key in candidates:
+        if key:
+            return url, key, source
+    return url, "", "missing"
+
+
+def _refresh_config_from_env() -> None:
+    global SUPABASE_URL, SUPABASE_KEY, SUPABASE_KEY_SOURCE, _client
+    url, key, source = _read_supabase_env()
+    if (url, key, source) != (SUPABASE_URL, SUPABASE_KEY, SUPABASE_KEY_SOURCE):
+        SUPABASE_URL = url
+        SUPABASE_KEY = key
+        SUPABASE_KEY_SOURCE = source
+        _client = None
+
+
+def _decode_jwt_role(key: str) -> str:
+    parts = (key or "").split(".")
+    if len(parts) < 2:
+        return "unknown"
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload.encode("utf-8")))
+        return str(data.get("role") or "unknown")
+    except Exception:
+        return "unknown"
+
+
+def _json_value(value: Any) -> Any:
+    return json.loads(json.dumps(value, default=str))
+
+
+def _record_error(context: str, exc: Exception) -> None:
+    global _last_error
+    _last_error = {
+        "context": context,
+        "type": type(exc).__name__,
+        "message": str(exc)[:500],
+    }
+    print(f"[WARN] Supabase {context} failed: {type(exc).__name__}: {str(exc)[:300]}")
+
+
+def _clear_error() -> None:
+    global _last_error
+    _last_error = None
+
+
+_refresh_config_from_env()
 
 
 def get_client() -> Client:
     """Lazy-initialise and return the Supabase client."""
     global _client
+    _refresh_config_from_env()
     if _client is None:
         if not SUPABASE_URL or not SUPABASE_KEY:
             raise RuntimeError("SUPABASE_URL / SUPABASE_KEY not set in .env")
         _client = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _client
+
+
+def supabase_health(probe: bool = False) -> dict[str, Any]:
+    """Return Supabase readiness and the last safe error, without exposing secrets."""
+
+    _refresh_config_from_env()
+    key_role = _decode_jwt_role(SUPABASE_KEY)
+    status: dict[str, Any] = {
+        "configured": bool(SUPABASE_URL and SUPABASE_KEY),
+        "available": None,
+        "key_source": SUPABASE_KEY_SOURCE,
+        "key_role": key_role,
+        "write_recommendation": "service_role" if key_role == "anon" else "ok",
+    }
+    if _last_error:
+        status["last_error"] = dict(_last_error)
+        status["available"] = False
+    if not status["configured"]:
+        status["available"] = False
+        return status
+    if key_role == "anon":
+        status["warning"] = (
+            "Anon keys cannot write to RLS-protected tables unless policies allow it. "
+            "Use SUPABASE_SERVICE_ROLE_KEY on the backend for durable writes."
+        )
+    if not probe:
+        return status
+    try:
+        get_client().table("call_logs").select("call_sid").limit(1).execute()
+        _clear_error()
+        status["available"] = True
+    except Exception as exc:
+        _record_error("health_probe", exc)
+        status["available"] = False
+        status["last_error"] = dict(_last_error or {})
+    return status
+
+
+def write_diagnostic_call_log(cleanup: bool = True) -> dict[str, Any]:
+    """Probe whether the configured key can insert call_logs rows."""
+
+    sid = f"diagnostic-{uuid4().hex[:12]}"
+    sb = get_client()
+    try:
+        resp = sb.table("call_logs").insert(
+            {
+                "call_sid": sid,
+                "caller_number": "+910000000000",
+                "transcript": [],
+                "ai_summary": "Supabase write diagnostic",
+            },
+        ).execute()
+        if cleanup:
+            sb.table("call_logs").delete().eq("call_sid", sid).execute()
+        _clear_error()
+        return {
+            "ok": True,
+            "call_sid": sid,
+            "inserted": bool(resp.data),
+            "cleaned_up": cleanup,
+        }
+    except Exception as exc:
+        _record_error("write_diagnostic_call_log", exc)
+        try:
+            if cleanup:
+                sb.table("call_logs").delete().eq("call_sid", sid).execute()
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "call_sid": sid,
+            "error": dict(_last_error or {}),
+            "hint": (
+                "If the error mentions row-level security, put the backend service-role key "
+                "in SUPABASE_SERVICE_ROLE_KEY or add explicit insert policies."
+            ),
+        }
 
 
 # ──────────────────────────────────────────────
@@ -326,8 +468,10 @@ def search_similar_cases(summary: str, category: str = None, limit: int = 5) -> 
     query = query.ilike("summary", f"%{summary[:80]}%").limit(limit)
     try:
         resp = query.execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("search_similar_cases", exc)
         return []
 
 
@@ -342,8 +486,10 @@ def get_all_resolved_cases(limit: int = 100, include_embedding: bool = False) ->
         resp = sb.table("resolved_cases").select(columns).order(
             "created_at", desc=True
         ).limit(limit).execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("get_all_resolved_cases", exc)
         return []
 
 
@@ -354,8 +500,10 @@ def get_resolved_cases_missing_embeddings(limit: int = 100) -> list[dict]:
         resp = sb.table("resolved_cases").select(
             "id,summary,category,language,dialect,urgency_band,resolution,tags,source_call_sid"
         ).is_("embedding", "null").order("created_at", desc=True).limit(limit).execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("get_resolved_cases_missing_embeddings", exc)
         return []
 
 
@@ -367,8 +515,10 @@ def update_resolved_case_embedding(case_id: str, embedding: list[float]) -> dict
             "embedding": embedding,
             "updated_at": dt.datetime.now(dt.UTC).isoformat(),
         }).eq("id", case_id).execute()
+        _clear_error()
         return resp.data[0] if resp.data else {}
-    except Exception:
+    except Exception as exc:
+        _record_error("update_resolved_case_embedding", exc)
         return {}
 
 
@@ -395,8 +545,10 @@ def match_resolved_cases(
     }
     try:
         resp = sb.rpc("match_resolved_cases", params).execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("match_resolved_cases", exc)
         if raise_errors:
             raise
         return []
@@ -404,6 +556,7 @@ def match_resolved_cases(
 
 def vector_db_health(embedding_dimension: int = 1536, probe: bool = False) -> dict:
     """Return vector DB readiness metadata without forcing network calls by default."""
+    _refresh_config_from_env()
     status = {
         "provider": "supabase_pgvector",
         "configured": bool(SUPABASE_URL and SUPABASE_KEY),
@@ -456,8 +609,13 @@ def insert_resolved_case(
     }
     if embedding:
         row["embedding"] = embedding
-    resp = sb.table("resolved_cases").insert(row).execute()
-    return resp.data[0] if resp.data else {}
+    try:
+        resp = sb.table("resolved_cases").insert(row).execute()
+        _clear_error()
+        return resp.data[0] if resp.data else {}
+    except Exception as exc:
+        _record_error("insert_resolved_case", exc)
+        return {}
 
 
 # ──────────────────────────────────────────────
@@ -472,8 +630,10 @@ def get_available_agents(language: str = None) -> list[dict]:
         query = query.contains("languages", [language])
     try:
         resp = query.order("current_load").execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("get_available_agents", exc)
         return []
 
 
@@ -482,8 +642,10 @@ def get_all_agents() -> list[dict]:
     sb = get_client()
     try:
         resp = sb.table("agents").select("*").execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("get_all_agents", exc)
         return []
 
 
@@ -492,28 +654,39 @@ def get_agent_by_id(agent_id: str) -> Optional[dict]:
     sb = get_client()
     try:
         resp = sb.table("agents").select("*").eq("id", agent_id).single().execute()
+        _clear_error()
         return resp.data
-    except Exception:
+    except Exception as exc:
+        _record_error("get_agent_by_id", exc)
         return None
 
 
 def update_agent_availability(agent_id: str, available: bool) -> dict:
     """Toggle agent availability."""
     sb = get_client()
-    resp = sb.table("agents").update({
-        "is_available": available
-    }).eq("id", agent_id).execute()
-    return resp.data[0] if resp.data else {}
+    try:
+        resp = sb.table("agents").update({
+            "is_available": available
+        }).eq("id", agent_id).execute()
+        _clear_error()
+        return resp.data[0] if resp.data else {}
+    except Exception as exc:
+        _record_error("update_agent_availability", exc)
+        return {}
 
 
 def increment_agent_load(agent_id: str) -> None:
     """Increment agent's current call load."""
     sb = get_client()
-    # Fetch current load, then increment
-    agent = sb.table("agents").select("current_load").eq("id", agent_id).execute()
-    if agent.data:
-        new_load = (agent.data[0].get("current_load", 0)) + 1
-        sb.table("agents").update({"current_load": new_load}).eq("id", agent_id).execute()
+    try:
+        # Fetch current load, then increment
+        agent = sb.table("agents").select("current_load").eq("id", agent_id).execute()
+        if agent.data:
+            new_load = (agent.data[0].get("current_load", 0)) + 1
+            sb.table("agents").update({"current_load": new_load}).eq("id", agent_id).execute()
+        _clear_error()
+    except Exception as exc:
+        _record_error("increment_agent_load", exc)
 
 
 # ──────────────────────────────────────────────
@@ -526,13 +699,15 @@ def create_call_log(call_sid: str, caller_number: str) -> dict:
     row = {
         "call_sid": call_sid,
         "caller_number": caller_number,
-        "transcript": json.dumps([]),
+        "transcript": [],
     }
     try:
-        resp = sb.table("call_logs").insert(row).execute()
+        resp = sb.table("call_logs").upsert(row, on_conflict="call_sid").execute()
+        _clear_error()
         return resp.data[0] if resp.data else {}
-    except Exception:
-        return {"call_sid": call_sid}
+    except Exception as exc:
+        _record_error("create_call_log", exc)
+        return {}
 
 
 def update_call_log(call_sid: str, **fields) -> dict:
@@ -540,14 +715,17 @@ def update_call_log(call_sid: str, **fields) -> dict:
     sb = get_client()
     fields["updated_at"] = dt.datetime.now(dt.UTC).isoformat()
     if "transcript" in fields and isinstance(fields["transcript"], list):
-        fields["transcript"] = json.dumps(fields["transcript"])
+        fields["transcript"] = _json_value(fields["transcript"])
     for json_field in ("handover_context", "routing_score_breakdown"):
         if json_field in fields and isinstance(fields[json_field], (dict, list)):
-            fields[json_field] = json.dumps(fields[json_field])
+            fields[json_field] = _json_value(fields[json_field])
     try:
-        resp = sb.table("call_logs").update(fields).eq("call_sid", call_sid).execute()
+        row = {"call_sid": call_sid, **fields}
+        resp = sb.table("call_logs").upsert(row, on_conflict="call_sid").execute()
+        _clear_error()
         return resp.data[0] if resp.data else {}
-    except Exception:
+    except Exception as exc:
+        _record_error("update_call_log", exc)
         return {}
 
 
@@ -557,7 +735,7 @@ def insert_call_event(event: dict) -> dict:
     row = {
         "call_sid": event.get("call_sid"),
         "event_type": event.get("event_type"),
-        "payload": json.dumps(event.get("payload", {})),
+        "payload": _json_value(event.get("payload", {})),
         "phase": event.get("phase"),
         "language": event.get("language"),
         "dialect": event.get("dialect"),
@@ -567,8 +745,10 @@ def insert_call_event(event: dict) -> dict:
     }
     try:
         resp = sb.table("call_events").insert(row).execute()
+        _clear_error()
         return resp.data[0] if resp.data else {}
-    except Exception:
+    except Exception as exc:
+        _record_error("insert_call_event", exc)
         return {}
 
 
@@ -580,8 +760,10 @@ def get_call_events(call_sid: str = None, limit: int = 100) -> list[dict]:
         if call_sid:
             query = query.eq("call_sid", call_sid)
         resp = query.order("created_at", desc=True).limit(limit).execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("get_call_events", exc)
         return []
 
 
@@ -590,8 +772,10 @@ def get_call_log(call_sid: str) -> Optional[dict]:
     sb = get_client()
     try:
         resp = sb.table("call_logs").select("*").eq("call_sid", call_sid).single().execute()
+        _clear_error()
         return resp.data
-    except Exception:
+    except Exception as exc:
+        _record_error("get_call_log", exc)
         return None
 
 
@@ -602,8 +786,10 @@ def get_recent_calls(limit: int = 50) -> list[dict]:
         resp = sb.table("call_logs").select("*").order(
             "created_at", desc=True
         ).limit(limit).execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("get_recent_calls", exc)
         return []
 
 
@@ -614,8 +800,10 @@ def get_active_calls() -> list[dict]:
         resp = sb.table("call_logs").select("*").is_("outcome", "null").order(
             "created_at", desc=True
         ).execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("get_active_calls", exc)
         return []
 
 
@@ -629,8 +817,10 @@ def upsert_queue_entry(entry: dict) -> dict:
     row = dict(entry)
     try:
         resp = sb.table("call_queue").upsert(row, on_conflict="call_sid").execute()
+        _clear_error()
         return resp.data[0] if resp.data else {}
-    except Exception:
+    except Exception as exc:
+        _record_error("upsert_queue_entry", exc)
         return {}
 
 
@@ -639,8 +829,10 @@ def get_queue_entry(call_sid: str) -> Optional[dict]:
     sb = get_client()
     try:
         resp = sb.table("call_queue").select("*").eq("call_sid", call_sid).single().execute()
+        _clear_error()
         return resp.data
-    except Exception:
+    except Exception as exc:
+        _record_error("get_queue_entry", exc)
         return None
 
 
@@ -652,8 +844,10 @@ def get_queue_entries(limit: int = 50, include_inactive: bool = True) -> list[di
         if not include_inactive:
             query = query.eq("status", "waiting")
         resp = query.order("priority_score", desc=True).order("created_at").limit(limit).execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("get_queue_entries", exc)
         return []
 
 
@@ -694,14 +888,16 @@ def register_complaint(
         "status": status,
         "assigned_agent": assigned_agent,
         "source": source,
-        "government_payload": json.dumps(government_payload or {}),
+        "government_payload": _json_value(government_payload or {}),
         "updated_at": dt.datetime.now(dt.UTC).isoformat(),
     }
     row = {key: value for key, value in row.items() if value is not None}
     try:
         resp = sb.table("complaints").insert(row).execute()
+        _clear_error()
         return resp.data[0] if resp.data else {}
-    except Exception:
+    except Exception as exc:
+        _record_error("register_complaint", exc)
         return {}
 
 
@@ -713,8 +909,10 @@ def get_complaints(limit: int = 50, call_sid: str | None = None) -> list[dict]:
         if call_sid:
             query = query.eq("call_sid", call_sid)
         resp = query.order("created_at", desc=True).limit(limit).execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("get_complaints", exc)
         return []
 
 
@@ -723,8 +921,10 @@ def get_complaint_by_reference(reference_id: str) -> Optional[dict]:
     sb = get_client()
     try:
         resp = sb.table("complaints").select("*").eq("reference_id", reference_id).single().execute()
+        _clear_error()
         return resp.data
-    except Exception:
+    except Exception as exc:
+        _record_error("get_complaint_by_reference", exc)
         return None
 
 
@@ -738,12 +938,14 @@ def insert_complaint_timeline_event(
     row = {
         "reference_id": reference_id,
         "event_type": event_type,
-        "payload": json.dumps(payload or {}),
+        "payload": _json_value(payload or {}),
     }
     try:
         resp = sb.table("complaint_timeline").insert(row).execute()
+        _clear_error()
         return resp.data[0] if resp.data else {}
-    except Exception:
+    except Exception as exc:
+        _record_error("insert_complaint_timeline_event", exc)
         return {}
 
 
@@ -755,8 +957,10 @@ def get_complaint_timeline(reference_id: str, limit: int = 100) -> list[dict]:
             "reference_id",
             reference_id,
         ).order("created_at", desc=True).limit(limit).execute()
+        _clear_error()
         return resp.data or []
-    except Exception:
+    except Exception as exc:
+        _record_error("get_complaint_timeline", exc)
         return []
 
 
@@ -807,53 +1011,7 @@ SEED_AGENTS = [
     },
 ]
 
-SEED_RESOLVED_CASES = [
-    {
-        "summary": "Caller reported mobile phone theft at Majestic bus stand. Stolen while boarding BMTC bus.",
-        "category": "theft",
-        "language": "kannada",
-        "dialect": "bengaluru",
-        "urgency_band": "medium",
-        "resolution": "FIR registered online. Advised to block SIM via telecom provider. Shared nearest police station details. Phone tracked via IMEI within 48 hours.",
-        "tags": ["mobile_theft", "public_transport", "bangalore"],
-    },
-    {
-        "summary": "Woman reported domestic violence by husband. Afraid for safety of children.",
-        "category": "domestic",
-        "language": "kannada",
-        "dialect": "",
-        "urgency_band": "high",
-        "resolution": "Immediate dispatch of nearest PCR van. Connected with Women Helpline 181. Temporary shelter arranged. FIR registered under IPC 498A.",
-        "tags": ["domestic_violence", "women_safety", "urgent"],
-    },
-    {
-        "summary": "Road accident reported on NH-44 near Tumkur toll. Two-wheeler hit by truck. Rider injured.",
-        "category": "accident",
-        "language": "hindi",
-        "dialect": "",
-        "urgency_band": "high",
-        "resolution": "Ambulance dispatched (108). Nearest hospital (Sri Siddhartha) alerted. Traffic police diverted traffic. FIR registered against truck driver.",
-        "tags": ["road_accident", "highway", "medical_emergency"],
-    },
-    {
-        "summary": "Neighbour playing loud music late at night causing disturbance. Repeated complaints ignored.",
-        "category": "noise",
-        "language": "english",
-        "dialect": "",
-        "urgency_band": "low",
-        "resolution": "Local beat constable dispatched to address the issue. Warning issued under Noise Pollution Rules. Follow-up scheduled for next 3 days.",
-        "tags": ["noise_complaint", "neighbourhood", "non_urgent"],
-    },
-    {
-        "summary": "Suspicious person loitering near school premises during school hours. Parents concerned.",
-        "category": "suspicious_activity",
-        "language": "kannada",
-        "dialect": "",
-        "urgency_band": "medium",
-        "resolution": "PCR van dispatched for verification. Person identified and warned. School principal informed. Increased patrol scheduled near school.",
-        "tags": ["suspicious_activity", "school_safety", "patrol"],
-    },
-]
+SEED_RESOLVED_CASES = resolved_case_seed_data()
 
 
 async def seed_demo_data():

@@ -81,11 +81,16 @@ def serializable_embedding(vector: list[float]) -> list[float]:
     return [round(value, 8) for value in vector]
 
 
+def _summary_key(value: str | None) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
 def deterministic_seed_cases() -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
     for index, case in enumerate(db.SEED_RESOLVED_CASES):
         row = dict(case)
         row.setdefault("id", f"seed-resolved-case-{index + 1}")
+        row.setdefault("source_call_sid", f"seed:{index + 1:03d}")
         row.setdefault("dialect", "")
         row.setdefault("urgency_band", _case_urgency_band(row))
         cases.append(row)
@@ -137,7 +142,7 @@ def _case_urgency_band(case: dict[str, Any]) -> str:
         return "critical"
     if category in {"accident", "domestic", "missing_person"}:
         return "high"
-    if category in {"theft", "cyber", "suspicious_activity"}:
+    if category in {"theft", "cyber", "suspicious_activity", "harassment", "civic"}:
         return "medium"
     return "low"
 
@@ -423,9 +428,18 @@ async def seed_demo_vector_cases(
     """Insert demo resolved cases with embeddings into Supabase."""
 
     cases = await generate_seed_case_embeddings(provider=provider)
+    existing_summaries = {
+        _summary_key(case.get("summary"))
+        for case in db.get_all_resolved_cases(limit=2000)
+        if case.get("summary")
+    }
     inserted = 0
+    skipped_existing = 0
     for case in cases:
         row = dict(case)
+        if _summary_key(row.get("summary")) in existing_summaries:
+            skipped_existing += 1
+            continue
         row.pop("id", None)
         result = db.insert_resolved_case(
             summary=row["summary"],
@@ -440,7 +454,8 @@ async def seed_demo_vector_cases(
         )
         if result:
             inserted += 1
-    return {"attempted": len(cases), "inserted": inserted}
+            existing_summaries.add(_summary_key(row.get("summary")))
+    return {"attempted": len(cases), "inserted": inserted, "skipped_existing": skipped_existing}
 
 
 async def backfill_resolved_case_embeddings(

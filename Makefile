@@ -6,7 +6,7 @@ DASHBOARD_HOST ?= 127.0.0.1
 DASHBOARD_PORT ?= 3000
 LEGACY_DASHBOARD_PORT ?= 8501
 
-.PHONY: help install install-dashboard dev-backend dev-dashboard dev-dashboard-legacy test lint format compile smoke seed-vector-cases backfill-vector-embeddings clean
+.PHONY: help install install-dashboard dev-backend dev-dashboard dev-dashboard-legacy test lint format compile smoke seed-vector-cases backfill-vector-embeddings diagnose-supabase clean
 
 help:
 	@echo "Sahayak 1092 developer commands"
@@ -22,6 +22,7 @@ help:
 	@echo "  make smoke          Run compile + tests"
 	@echo "  make seed-vector-cases          Seed Supabase resolved cases with embeddings"
 	@echo "  make backfill-vector-embeddings Backfill missing resolved-case embeddings"
+	@echo "  make diagnose-supabase          Check Supabase read/write access"
 	@echo "  make clean          Remove local Python caches"
 
 install:
@@ -58,6 +59,9 @@ seed-vector-cases:
 
 backfill-vector-embeddings:
 	$(PYTHON) -m backend.vector_admin backfill
+
+diagnose-supabase:
+	$(PYTHON) -m backend.vector_admin diagnose-supabase
 
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
