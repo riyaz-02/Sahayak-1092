@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import audioop
 import struct
 
 
@@ -10,49 +11,25 @@ MULAW_CHANNELS = 1
 
 
 def mulaw_to_pcm16(mulaw_bytes: bytes) -> bytes:
-    """Convert mu-law encoded bytes to 16-bit little-endian PCM."""
+    """Convert mu-law encoded bytes to 16-bit little-endian PCM (G.711).
 
-    mulaw_bias = 33
-    pcm_samples: list[int] = []
-
-    for byte in mulaw_bytes:
-        mu = ~byte & 0xFF
-        sign = mu & 0x80
-        exponent = (mu >> 4) & 0x07
-        mantissa = mu & 0x0F
-        sample = ((mantissa << 3) + mulaw_bias) << exponent
-        sample -= mulaw_bias
-        if sign:
-            sample = -sample
-        pcm_samples.append(max(-32768, min(32767, sample)))
-
-    return struct.pack(f"<{len(pcm_samples)}h", *pcm_samples)
+    Uses audioop.ulaw2lin for standards-compliant ITU-T G.711 decoding.
+    """
+    # audioop.ulaw2lin returns big-endian PCM; convert to little-endian
+    pcm_be = audioop.ulaw2lin(mulaw_bytes, 2)
+    # audioop on most platforms already returns native (little-endian on x86)
+    return pcm_be
 
 
 def pcm16_to_mulaw(pcm_bytes: bytes) -> bytes:
-    """Convert 16-bit little-endian PCM bytes to mu-law bytes."""
+    """Convert 16-bit little-endian PCM bytes to mu-law bytes (G.711).
 
-    mulaw_max = 0x1FFF
-    mulaw_bias = 33
-    samples = struct.unpack(f"<{len(pcm_bytes) // 2}h", pcm_bytes)
-    mulaw_bytes = bytearray()
-
-    for sample in samples:
-        sign = 0x80 if sample < 0 else 0
-        sample = min(abs(sample), mulaw_max)
-        sample += mulaw_bias
-
-        exponent = 7
-        for exp in range(7, -1, -1):
-            if sample >= (1 << (exp + 3)):
-                exponent = exp
-                break
-
-        mantissa = (sample >> (exponent + 3)) & 0x0F
-        mulaw_byte = ~(sign | (exponent << 4) | mantissa) & 0xFF
-        mulaw_bytes.append(mulaw_byte)
-
-    return bytes(mulaw_bytes)
+    Uses audioop.lin2ulaw for standards-compliant ITU-T G.711 encoding.
+    The previous custom encoder was missing the 16-bit -> 14-bit right-shift
+    (>> 2) before the 0x1FFF clip, causing hard clipping of the top 75% of
+    the PCM dynamic range and severe crackling in Twilio playback.
+    """
+    return audioop.lin2ulaw(pcm_bytes, 2)
 
 
 def create_wav_header(

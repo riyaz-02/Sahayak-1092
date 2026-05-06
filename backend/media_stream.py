@@ -418,11 +418,17 @@ class MediaStreamHandler:
         return result
 
     async def _send_audio(self, mulaw_audio: bytes) -> None:
-        """Send mu-law audio bytes back to Twilio in 20 ms frames."""
+        """Send mu-law audio bytes back to Twilio in 20 ms frames.
 
-        chunk_size = 160
+        Frames are sent back-to-back without artificial per-frame delays.
+        Twilio buffers incoming media and handles its own jitter compensation;
+        adding asyncio.sleep(0.020) per frame causes uneven delivery through
+        variable-latency tunnels (ngrok) and produces crackling artefacts.
+        """
+
+        chunk_size = 160  # 20 ms of 8 kHz mu-law
         for i in range(0, len(mulaw_audio), chunk_size):
-            chunk = mulaw_audio[i:i + chunk_size]
+            chunk = mulaw_audio[i : i + chunk_size]
             payload = base64.b64encode(chunk).decode("utf-8")
             message = {
                 "event": "media",
@@ -433,7 +439,9 @@ class MediaStreamHandler:
                 await self.ws.send_json(message)
             except Exception:
                 break
-            await asyncio.sleep(0.020)
+        # Single yield so the event loop can process incoming frames
+        # without blocking the WebSocket receiver during long TTS responses.
+        await asyncio.sleep(0)
 
     async def _send_mark(self, name: str) -> None:
         """Send a Twilio mark event to track audio playback position."""
