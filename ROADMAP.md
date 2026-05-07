@@ -3,7 +3,7 @@
 This roadmap breaks the full Sahayak 1092 build into controlled phases. Each
 phase should be completed, tested, and committed before moving to the next one.
 The goal is to keep the project production-minded while still easy to run for
-local development and competition demos.
+local development and competition demos
 
 ## Build Principle
 
