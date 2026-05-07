@@ -37,6 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 from twilio.rest import Client as TwilioClient
+from twilio.base.exceptions import TwilioRestException
 
 from backend.agent import get_sahayak_agent
 from backend.api.health import build_health_payload
@@ -84,6 +85,33 @@ TWILIO_AUTH_TOKEN = settings.twilio_auth_token
 twilio_client = None
 if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
     twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+
+def _twilio_outbound_error_detail(exc: Exception) -> str:
+    """Return a safe, actionable Twilio error for dashboard users."""
+
+    if isinstance(exc, TwilioRestException):
+        code = getattr(exc, "code", None)
+        message = str(getattr(exc, "msg", "") or exc).strip()
+        if code == 21608:
+            return (
+                "Twilio trial accounts can call only verified recipient numbers. "
+                "Verify this phone number in Twilio, or upgrade the account."
+            )
+        if code == 21408:
+            return (
+                "Twilio geo permissions block calls to this country/region. "
+                "Enable the destination country in Twilio Voice Geo Permissions."
+            )
+        if code == 21211:
+            return "The destination phone number is invalid. Use E.164 format, for example +919876543210."
+        if code == 21606:
+            return "The configured Twilio caller number cannot make outbound voice calls."
+        if code in {20003, 20005}:
+            return "Twilio authentication/account status failed. Check TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN."
+        if message:
+            return f"Twilio rejected the call: {message}"
+    return "Twilio rejected the outbound call. Check trial verification, geo permissions, balance, and number format."
 
 
 # ── Lifespan ─────────────────────────────────
@@ -406,13 +434,14 @@ async def call_me(request: Request):
             "from": TWILIO_PHONE_NUMBER,
         })
     except Exception as exc:
+        detail = _twilio_outbound_error_detail(exc)
         json_log(
             "outbound_call_failed",
             request_id=getattr(request.state, "request_id", ""),
             phone=phone,
-            error=str(exc),
+            error=detail,
         )
-        raise HTTPException(status_code=500, detail="Call failed")
+        raise HTTPException(status_code=500, detail=detail)
 
 
 # ──────────────────────────────────────────────

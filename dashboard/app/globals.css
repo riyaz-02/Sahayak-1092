@@ -103,6 +103,15 @@ button {
   min-width: 220px;
 }
 
+.brand-logo {
+  display: block;
+  width: 118px;
+  height: 44px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  object-position: left center;
+}
+
 .brand-mark {
   display: grid;
   width: 42px;
@@ -135,6 +144,15 @@ button {
 .brand-name {
   font-size: 15px;
   font-weight: 900;
+}
+
+.auth-logo {
+  display: block;
+  width: min(260px, 78vw);
+  height: auto;
+  max-height: 142px;
+  object-fit: contain;
+  object-position: left center;
 }
 
 .top-actions {
@@ -419,6 +437,14 @@ button {
   font-size: 18px;
   font-weight: 900;
   line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.mini-detail {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.2;
   overflow-wrap: anywhere;
 }
 
