@@ -715,14 +715,15 @@ export default function DashboardPage() {
   }
 
   return (
-    <main className="shell">
-      {/* Tricolour bar */}
-      <div style={{ display:"flex", height:"5px", width:"calc(100% + 48px)", marginLeft:"-24px" }}>
-        <span style={{ flex:1, background:"#FF9933" }} />
-        <span style={{ flex:1, background:"#FFFFFF", borderTop:"1px solid #eee", borderBottom:"1px solid #eee" }} />
-        <span style={{ flex:1, background:"#138808" }} />
+    <div className="shell-root">
+      {/* Tricolour strip */}
+      <div className="tricolour-strip">
+        <span style={{ background:"#FF9933" }} />
+        <span style={{ background:"#FFFFFF", borderTop:"1px solid #ddd", borderBottom:"1px solid #ddd" }} />
+        <span style={{ background:"#138808" }} />
       </div>
 
+      {/* ── Top bar ── */}
       <header className="topbar">
         <div className="brand-lockup">
           <img className="brand-logo" src="/sahayak_logo.svg" alt="Sahayak 1092" />
@@ -730,10 +731,9 @@ export default function DashboardPage() {
             <div className="eyebrow">भारत सरकार · Sahayak 1092</div>
             <div className="brand-name">Officer Command Center</div>
           </div>
-          {/* India Flag SVG */}
-          <svg width="40" height="27" viewBox="0 0 900 600" xmlns="http://www.w3.org/2000/svg"
+          <svg width="36" height="24" viewBox="0 0 900 600" xmlns="http://www.w3.org/2000/svg"
             aria-label="Flag of India"
-            style={{ borderRadius:"2px", boxShadow:"0 2px 6px rgba(0,0,0,0.4)", flexShrink:0, marginLeft:"6px" }}>
+            style={{ borderRadius:"2px", boxShadow:"0 2px 6px rgba(0,0,0,0.4)", flexShrink:0, marginLeft:"8px" }}>
             <rect width="900" height="200" fill="#FF9933" />
             <rect y="200" width="900" height="200" fill="#FFFFFF" />
             <rect y="400" width="900" height="200" fill="#138808" />
@@ -753,181 +753,118 @@ export default function DashboardPage() {
             {data.health?.status || "offline"}
           </span>
           {lastUpdated && <span className="mono-pill">Updated {lastUpdated}</span>}
-          <button
-            className={`btn ghost ${autoRefresh ? "toggle-on" : ""}`}
-            onClick={() => setAutoRefresh((current) => !current)}
-            type="button"
-          >
-            <Radio size={16} />
-            {autoRefresh ? "Live on" : "Live paused"}
+          <button className={`btn ghost ${autoRefresh ? "toggle-on" : ""}`}
+            onClick={() => setAutoRefresh((c) => !c)} type="button">
+            <Radio size={15} />{autoRefresh ? "Live on" : "Live paused"}
           </button>
           <button className="btn primary" onClick={() => refresh("manual")} disabled={refreshing}>
-            <RefreshCw className={loading ? "spin" : ""} size={16} />
+            <RefreshCw className={loading ? "spin" : ""} size={15} />
             {loading ? "Refreshing" : "Refresh"}
           </button>
         </div>
       </header>
 
-      {/* Compact command strip — replaces the large hero */}
-      <div className="cmd-strip">
-        <div className="cmd-strip-left">
-          <span className="cmd-strip-kicker">
-            <span className="cmd-live-dot" />
-            AI-FIRST COMMAND CENTER
-          </span>
-          <span className="cmd-strip-title">Sahayak 1092 — Officer Dashboard</span>
-        </div>
-        <div className="cmd-strip-signals">
-          <div className="cmd-signal">
-            <span className="cmd-signal-val">{data.activeCalls.length}</span>
-            <span className="cmd-signal-lbl">Live Calls</span>
+      {/* ── Body: sidebar + main ── */}
+      <div className="db-layout">
+
+        {/* LEFT SIDEBAR */}
+        <aside className="db-sidebar">
+          <nav className="sidebar-nav" aria-label="Dashboard navigation">
+            {tabs.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button key={item.key}
+                  className={`sidebar-btn ${tab === item.key ? "active" : ""}`}
+                  onClick={() => setTab(item.key)}>
+                  <Icon size={16} />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+          <div className="sidebar-divider" />
+          <div className="sidebar-stats">
+            <div className="sidebar-stat">
+              <span className="sidebar-stat-val">{data.activeCalls.length}</span>
+              <span className="sidebar-stat-lbl">Live Calls</span>
+            </div>
+            <div className="sidebar-stat">
+              <span className="sidebar-stat-val" style={{ color: highHelpAlerts.length > 0 ? "#fca5a5" : undefined }}>
+                {highHelpAlerts.length}
+              </span>
+              <span className="sidebar-stat-lbl">Alerts</span>
+            </div>
+            <div className="sidebar-stat">
+              <span className="sidebar-stat-val" style={{ color:"#4ade80" }}>{availableAgents.length}</span>
+              <span className="sidebar-stat-lbl">Online</span>
+            </div>
+            <div className="sidebar-stat">
+              <span className="sidebar-stat-val">{data.cases.length}</span>
+              <span className="sidebar-stat-lbl">Cases</span>
+            </div>
           </div>
-          <div className="cmd-signal-sep" />
-          <div className="cmd-signal">
-            <span className="cmd-signal-val" style={{ color: highHelpAlerts.length > 0 ? "#fca5a5" : undefined }}>
-              {highHelpAlerts.length}
-            </span>
-            <span className="cmd-signal-lbl">Queue Alerts</span>
-          </div>
-          <div className="cmd-signal-sep" />
-          <div className="cmd-signal">
-            <span className="cmd-signal-val" style={{ color: "#4ade80" }}>{availableAgents.length}</span>
-            <span className="cmd-signal-lbl">Officers Online</span>
-          </div>
-          <div className="cmd-signal-sep" />
-          <div className="cmd-signal">
-            <span className="cmd-signal-val">{data.cases.length}</span>
-            <span className="cmd-signal-lbl">Vector Cases</span>
-          </div>
-          <div className="cmd-signal-sep" />
-          <div className="cmd-signal">
-            <span className="cmd-signal-val">{data.events.length}</span>
-            <span className="cmd-signal-lbl">Audit Events</span>
-          </div>
+        </aside>
+
+        {/* RIGHT MAIN */}
+        <div className="db-main">
+          <section className="metric-grid">
+            {stats.map((item) => (
+              <MetricCard key={item.label} {...item} />
+            ))}
+          </section>
+
+          {(toast || error) && (
+            <div className={`toast ${error ? "error" : ""}`}>{error || toast}</div>
+          )}
+
+          <section className={`workspace${tab === "complaints" ? " workspace-full" : ""}`}>
+            <div className="main-stack">
+              {(tab === "overview" || tab === "calls") && (
+                <ActiveCalls calls={data.activeCalls} selectedCallSid={selectedCallSid}
+                  onSelect={setSelectedCallSid} onTranscript={loadTranscript}
+                  onAccept={acceptHandover} transcripts={transcripts}
+                  handoverNotes={handoverNotes} setHandoverNotes={setHandoverNotes} />
+              )}
+              {(tab === "overview" || tab === "queue") && <QueuePanel queue={data.queue} />}
+              {tab === "officers" && <OfficerPanel agents={data.agents} onToggle={toggleAgent} />}
+              {tab === "complaints" && (
+                <ComplaintPanel complaints={data.complaints} callLogs={data.callLogs}
+                  onViewDetail={setSelectedComplaint} />
+              )}
+              {selectedComplaint && (
+                <ComplaintDetailModal complaint={selectedComplaint} callLogs={data.callLogs}
+                  onClose={() => setSelectedComplaint(null)} dashboardKey={dashboardKeyRef.current} />
+              )}
+              {tab === "knowledge" && <KnowledgePanel cases={data.cases} />}
+              {tab === "audit" && (
+                <><AgentTracePanel traces={data.agentTraces} /><AuditPanel events={data.events} /></>
+              )}
+              {tab === "test" && (
+                <TestConsole text={testText} setText={setTestText} language={testLanguage}
+                  setLanguage={setTestLanguage} callSid={testCallSid} setCallSid={setTestCallSid}
+                  result={testResult} onSubmit={runTestPipeline} />
+              )}
+              {tab === "call" && (
+                <CallMePanel phone={callPhone} setPhone={setCallPhone} isd={callIsd}
+                  setIsd={setCallIsd} status={callStatus} result={callResult} error={callError}
+                  onSubmit={initiateCall}
+                  onReset={() => { setCallStatus("idle"); setCallResult(null); setCallError(""); setCallPhone(""); }} />
+              )}
+            </div>
+            {tab !== "complaints" && (
+              <aside className="side-stack">
+                <CorrectionPanel selectedCall={selectedCall} correction={correction}
+                  setCorrection={setCorrection} onApply={applyCorrection} onLearn={learnFromCall} />
+                <HealthPanel health={data.health} />
+                <AuditPanel events={data.events.slice(0, 6)} compact />
+              </aside>
+            )}
+          </section>
         </div>
       </div>
-
-      <nav className="nav" aria-label="Dashboard navigation">
-        {tabs.map((item) => {
-          const Icon = item.icon;
-          return (
-            <button
-              key={item.key}
-              className={`nav-button ${tab === item.key ? "active" : ""}`}
-              onClick={() => setTab(item.key)}
-            >
-              <Icon size={15} />
-              {item.label}
-            </button>
-          );
-        })}
-      </nav>
-
-      <section className="metric-grid">
-        {stats.map((item) => (
-          <MetricCard key={item.label} {...item} />
-        ))}
-      </section>
-
-      {(toast || error) && (
-        <div className={`toast ${error ? "error" : ""}`}>{error || toast}</div>
-      )}
-
-      <section className={`workspace${tab === "complaints" ? " workspace-full" : ""}`}>
-        <div className="main-stack">
-          {(tab === "overview" || tab === "calls") && (
-            <ActiveCalls
-              calls={data.activeCalls}
-              selectedCallSid={selectedCallSid}
-              onSelect={setSelectedCallSid}
-              onTranscript={loadTranscript}
-              onAccept={acceptHandover}
-              transcripts={transcripts}
-              handoverNotes={handoverNotes}
-              setHandoverNotes={setHandoverNotes}
-            />
-          )}
-
-          {(tab === "overview" || tab === "queue") && <QueuePanel queue={data.queue} />}
-
-          {tab === "officers" && <OfficerPanel agents={data.agents} onToggle={toggleAgent} />}
-
-          {tab === "complaints" && (
-            <ComplaintPanel
-              complaints={data.complaints}
-              callLogs={data.callLogs}
-              onViewDetail={setSelectedComplaint}
-            />
-          )}
-
-          {selectedComplaint && (
-            <ComplaintDetailModal
-              complaint={selectedComplaint}
-              callLogs={data.callLogs}
-              onClose={() => setSelectedComplaint(null)}
-              dashboardKey={dashboardKeyRef.current}
-            />
-          )}
-
-
-          {tab === "knowledge" && <KnowledgePanel cases={data.cases} />}
-
-          {tab === "audit" && (
-            <>
-              <AgentTracePanel traces={data.agentTraces} />
-              <AuditPanel events={data.events} />
-            </>
-          )}
-
-          {tab === "test" && (
-            <TestConsole
-              text={testText}
-              setText={setTestText}
-              language={testLanguage}
-              setLanguage={setTestLanguage}
-              callSid={testCallSid}
-              setCallSid={setTestCallSid}
-              result={testResult}
-              onSubmit={runTestPipeline}
-            />
-          )}
-
-          {tab === "call" && (
-            <CallMePanel
-              phone={callPhone}
-              setPhone={setCallPhone}
-              isd={callIsd}
-              setIsd={setCallIsd}
-              status={callStatus}
-              result={callResult}
-              error={callError}
-              onSubmit={initiateCall}
-              onReset={() => {
-                setCallStatus("idle");
-                setCallResult(null);
-                setCallError("");
-                setCallPhone("");
-              }}
-            />
-          )}
-        </div>
-
-        {tab !== "complaints" && (
-          <aside className="side-stack">
-            <CorrectionPanel
-              selectedCall={selectedCall}
-              correction={correction}
-              setCorrection={setCorrection}
-              onApply={applyCorrection}
-              onLearn={learnFromCall}
-            />
-            <HealthPanel health={data.health} />
-            <AuditPanel events={data.events.slice(0, 6)} compact />
-          </aside>
-        )}
-      </section>
-    </main>
+    </div>
   );
+
 }
 
 function DashboardLogin({

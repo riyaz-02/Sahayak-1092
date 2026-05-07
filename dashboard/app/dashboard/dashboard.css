@@ -1,4 +1,157 @@
 /* ══════════════════════
+   SIDEBAR LAYOUT
+══════════════════════ */
+
+/* Root wrapper — full viewport height, flex column */
+.shell-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--off-white);
+  font-family: 'Noto Sans', 'Space Grotesk', sans-serif;
+}
+
+/* Tricolour strip */
+.tricolour-strip {
+  display: flex;
+  height: 4px;
+  width: 100%;
+  flex-shrink: 0;
+}
+.tricolour-strip span { flex: 1; }
+
+/* Full-width topbar — no margin overrides needed */
+.shell-root .topbar {
+  width: 100% !important;
+  margin: 0 !important;
+  flex-shrink: 0;
+}
+
+/* db-layout fills ALL remaining height after topbar */
+.db-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;  /* critical: lets flex children shrink below content size */
+  overflow: hidden;
+}
+
+/* ── LEFT SIDEBAR ── */
+.db-sidebar {
+  width: 190px;
+  min-width: 190px;
+  background: var(--navy-dark);
+  border-right: 1px solid rgba(255,255,255,0.07);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  flex-shrink: 0;
+  /* NO position:sticky, NO top offset — sidebar starts right below topbar */
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 6px;
+  gap: 1px;
+}
+
+.sidebar-btn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border-radius: 3px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.6);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
+  width: 100%;
+  white-space: nowrap;
+}
+
+.sidebar-btn:hover {
+  background: rgba(255,255,255,0.07);
+  color: rgba(255,255,255,0.9);
+}
+
+.sidebar-btn.active {
+  background: var(--saffron);
+  color: #fff;
+  font-weight: 700;
+}
+
+.sidebar-btn svg {
+  opacity: 0.75;
+  flex-shrink: 0;
+}
+.sidebar-btn.active svg { opacity: 1; }
+
+.sidebar-divider {
+  height: 1px;
+  background: rgba(255,255,255,0.08);
+  margin: 6px 10px;
+}
+
+/* Live stats pinned at bottom of sidebar */
+.sidebar-stats {
+  margin-top: auto;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.sidebar-stat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sidebar-stat-val {
+  font-size: 17px;
+  font-weight: 900;
+  color: var(--saffron-light);
+  line-height: 1;
+}
+
+.sidebar-stat-lbl {
+  font-size: 10px;
+  color: rgba(255,255,255,0.38);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+/* ── RIGHT MAIN AREA ── */
+.db-main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 14px 18px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--off-white);
+}
+
+/* Cancel old shell margin/width hacks inside db-main */
+.db-main .metric-grid,
+.db-main .workspace,
+.db-main .toast {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  width: 100% !important;
+}
+
+
+/* ══════════════════════
    COMPACT COMMAND STRIP
 ══════════════════════ */
 .cmd-strip {
