@@ -188,7 +188,7 @@ export default function LandingPage() {
 
               {/* Sub */}
               <p className="text-xl md:text-2xl max-w-2xl mx-auto mb-4 text-white/90 leading-relaxed">
-                Most 1092 calls go to a human even for routine help — causing delays, officer burnout, and citizens repeating themselves. Sahayak answers instantly, understands your dialect, solves your problem end-to-end, and only brings in an officer when it truly cannot handle it alone.
+                Most 1092 calls go to a human even for routine help — causing delays, officer burnout, and citizens repeating themselves. Sahayak answers instantly, understands your dialect, solves your problem end-to-end.
               </p>
 
               {/* Stats strip */}
