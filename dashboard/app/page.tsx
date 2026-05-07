@@ -10,10 +10,12 @@ import {
   Edit3,
   FileText,
   History,
+  Info,
   KeyRound,
   Mic,
   Network,
   PhoneCall,
+  PhoneOutgoing,
   Radio,
   RefreshCw,
   Send,
@@ -52,7 +54,8 @@ type TabKey =
   | "complaints"
   | "knowledge"
   | "audit"
-  | "test";
+  | "test"
+  | "call";
 
 const API_BASE = "/api/sahayak";
 const AUTO_REFRESH_MS = 15000;
@@ -78,7 +81,8 @@ const tabs: Array<{ key: TabKey; label: string; icon: typeof Activity }> = [
   { key: "complaints", label: "Complaints", icon: FileText },
   { key: "knowledge", label: "Knowledge", icon: BookOpen },
   { key: "audit", label: "Audit", icon: History },
-  { key: "test", label: "Test Console", icon: Send }
+  { key: "test", label: "Test Console", icon: Send },
+  { key: "call", label: "Call Me", icon: PhoneOutgoing }
 ];
 
 const categories = [
@@ -252,6 +256,13 @@ export default function DashboardPage() {
   const [testLanguage, setTestLanguage] = useState("english");
   const [testCallSid, setTestCallSid] = useState(`demo-${Date.now()}`);
   const [testResult, setTestResult] = useState<AnyRecord | null>(null);
+  // ── Call Me state ────────────────────────────────────
+  const [callPhone, setCallPhone] = useState("");
+  const [callIsd, setCallIsd] = useState("+91");
+  const [callStatus, setCallStatus] = useState<"idle" | "calling" | "success" | "error">("idle");
+  const [callResult, setCallResult] = useState<AnyRecord | null>(null);
+  const [callError, setCallError] = useState("");
+  // ────────────────────────────────────────────────────
   const dataRef = useRef<DashboardData>(emptyData);
   const dashboardKeyRef = useRef("");
   const refreshControllerRef = useRef<AbortController | null>(null);
@@ -635,6 +646,42 @@ export default function DashboardPage() {
     refresh("background");
   }
 
+  async function initiateCall(event: FormEvent) {
+    event.preventDefault();
+    const digits = callPhone.replace(/\D/g, "");
+    if (digits.length < 7) {
+      setCallError("Enter a valid phone number.");
+      return;
+    }
+    const fullPhone = callPhone.startsWith("+") ? callPhone : `${callIsd}${digits}`;
+    setCallStatus("calling");
+    setCallError("");
+    setCallResult(null);
+    try {
+      const result = await apiPost<AnyRecord>(
+        "/api/call-me",
+        { phone: fullPhone },
+        { status: "error", message: "Backend unreachable" },
+        dashboardKeyRef.current
+      );
+      if (result.status === "calling") {
+        setCallStatus("success");
+        setCallResult(result);
+        setToast(`📞 Sahayak is calling ${fullPhone} — pick up!`);
+      } else {
+        setCallStatus("error");
+        setCallError(result.detail || result.message || "Call could not be placed.");
+      }
+    } catch (authError) {
+      if (authError instanceof DashboardAuthError) {
+        handleDashboardAuthRequired();
+      } else {
+        setCallStatus("error");
+        setCallError("Unexpected error. Check backend and Twilio credentials.");
+      }
+    }
+  }
+
   if (authRequired) {
     return (
       <DashboardLogin
@@ -781,6 +828,25 @@ export default function DashboardPage() {
               setCallSid={setTestCallSid}
               result={testResult}
               onSubmit={runTestPipeline}
+            />
+          )}
+
+          {tab === "call" && (
+            <CallMePanel
+              phone={callPhone}
+              setPhone={setCallPhone}
+              isd={callIsd}
+              setIsd={setCallIsd}
+              status={callStatus}
+              result={callResult}
+              error={callError}
+              onSubmit={initiateCall}
+              onReset={() => {
+                setCallStatus("idle");
+                setCallResult(null);
+                setCallError("");
+                setCallPhone("");
+              }}
             />
           )}
         </div>
@@ -1422,5 +1488,151 @@ function AgentTraceSummary({ trace }: { trace: AnyRecord }) {
         </div>
       )}
     </div>
+  );
+}
+
+// ── ISD country codes ───────────────────────────────────
+const ISD_CODES = [
+  { code: "+91", label: "🇮🇳 IN +91" },
+  { code: "+1",  label: "🇺🇸 US +1" },
+  { code: "+44", label: "🇬🇧 UK +44" },
+  { code: "+971", label: "🇦🇪 UAE +971" },
+  { code: "+65", label: "🇸🇬 SG +65" },
+  { code: "+61", label: "🇦🇺 AU +61" },
+  { code: "+49", label: "🇩🇪 DE +49" },
+  { code: "+81", label: "🇯🇵 JP +81" },
+  { code: "+86", label: "🇨🇳 CN +86" },
+];
+
+function CallMePanel({
+  phone,
+  setPhone,
+  isd,
+  setIsd,
+  status,
+  result,
+  error,
+  onSubmit,
+  onReset
+}: {
+  phone: string;
+  setPhone: (v: string) => void;
+  isd: string;
+  setIsd: (v: string) => void;
+  status: "idle" | "calling" | "success" | "error";
+  result: AnyRecord | null;
+  error: string;
+  onSubmit: (event: FormEvent) => void;
+  onReset: () => void;
+}) {
+  const isCalling = status === "calling";
+
+  return (
+    <section className="panel">
+      <div className="section-header">
+        <div>
+          <div className="section-kicker">Outbound via Twilio</div>
+          <h2 className="section-title">Call Me</h2>
+          <p className="section-copy">
+            Sahayak calls the citizen — no ISD recharge needed on their phone.
+          </p>
+        </div>
+        <Badge tone={status === "success" ? "green" : status === "error" ? "red" : status === "calling" ? "blue" : "purple"}>
+          <PhoneOutgoing size={13} />
+          {status === "idle" ? "ready" : status}
+        </Badge>
+      </div>
+
+      {/* Info box */}
+      <div className="callme-info">
+        <Info size={15} style={{ flexShrink: 0, marginTop: 2 }} />
+        <div>
+          <strong>Why this tab?</strong> Twilio&apos;s outbound calling requires an ISD-enabled
+          balance on the Twilio account — <em>not</em> on the recipient&apos;s phone. Enter any
+          number below and Sahayak calls them from <code>+1 866 621 2451</code>. The recipient
+          just picks up normally.
+        </div>
+      </div>
+
+      {status === "success" && result ? (
+        <div className="callme-success">
+          <div className="callme-success-icon">📞</div>
+          <div className="callme-success-body">
+            <div className="caller" style={{ fontSize: "1.1rem" }}>
+              Sahayak is calling {result.to}
+            </div>
+            <div className="summary">{result.message}</div>
+            <div className="mini-grid" style={{ marginTop: 12 }}>
+              <Mini label="From" value={result.from || "+1 866 621 2451"} />
+              <Mini label="To" value={result.to || phone} />
+              <Mini label="Call SID" value={result.call_sid ? result.call_sid.slice(0, 12) + "…" : "—"} />
+            </div>
+          </div>
+          <button className="btn ghost" type="button" onClick={onReset} style={{ alignSelf: "flex-start" }}>
+            <PhoneOutgoing size={15} />
+            New call
+          </button>
+        </div>
+      ) : (
+        <form className="form-grid" onSubmit={onSubmit}>
+          <label className="field">
+            <span className="field-label">Country / ISD code</span>
+            <select
+              className="select"
+              value={isd}
+              onChange={(e) => setIsd(e.target.value)}
+              disabled={isCalling}
+            >
+              {ISD_CODES.map((c) => (
+                <option key={c.code} value={c.code}>{c.label}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field">
+            <span className="field-label">Phone number</span>
+            <input
+              className="input mono"
+              type="tel"
+              placeholder="9876543210"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              disabled={isCalling}
+              autoComplete="tel"
+            />
+          </label>
+
+          <div className="callme-preview">
+            Will dial: <strong>{phone ? (phone.startsWith("+") ? phone : `${isd}${phone.replace(/\D/g, "")}`) : `${isd}…`}</strong>
+          </div>
+
+          {error && <div className="toast error wide">{error}</div>}
+
+          <div className="button-row wide">
+            <button
+              className={`btn primary ${isCalling ? "calling-pulse" : ""}`}
+              disabled={isCalling}
+            >
+              {isCalling ? (
+                <><RefreshCw size={15} className="spin" /> Calling…</>
+              ) : (
+                <><PhoneOutgoing size={15} /> Call this number</>  
+              )}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* How it works */}
+      <div className="callme-steps">
+        <div className="section-kicker" style={{ marginBottom: 8 }}>How it works</div>
+        <ol className="callme-ol">
+          <li>Enter the target phone number and click <strong>Call this number</strong>.</li>
+          <li>Twilio deducts from the <em>Sahayak Twilio balance</em> (ISD-enabled) — the recipient pays nothing.</li>
+          <li>Sahayak&apos;s AI answers the moment they pick up, just like an inbound 1092 call.</li>
+          <li>The call appears live in the <strong>Live Calls</strong> tab within seconds.</li>
+        </ol>
+      </div>
+    </section>
   );
 }
