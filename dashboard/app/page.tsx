@@ -11,7 +11,6 @@ import {
   FileText,
   History,
   Info,
-  KeyRound,
   Mic,
   Network,
   PhoneCall,
@@ -114,6 +113,17 @@ function apiHeaders(dashboardKey = "") {
     headers["x-sahayak-dashboard-key"] = dashboardKey;
   }
   return headers;
+}
+
+function responseMessage(result: AnyRecord, fallback: string) {
+  return (
+    result.detail ||
+    result.message ||
+    result.error?.message ||
+    result.error?.detail ||
+    result.error ||
+    fallback
+  );
 }
 
 async function apiGet<T>(
@@ -670,7 +680,7 @@ export default function DashboardPage() {
         setToast(`📞 Sahayak is calling ${fullPhone} — pick up!`);
       } else {
         setCallStatus("error");
-        setCallError(result.detail || result.message || "Call could not be placed.");
+        setCallError(responseMessage(result, "Call could not be placed."));
       }
     } catch (authError) {
       if (authError instanceof DashboardAuthError) {
@@ -697,9 +707,7 @@ export default function DashboardPage() {
     <main className="shell">
       <header className="topbar">
         <div className="brand-lockup">
-          <div className="brand-mark">
-            <ShieldCheck size={22} />
-          </div>
+          <img className="brand-logo" src="/sahayak_logo.svg" alt="Sahayak 1092" />
           <div className="brand-meta">
             <div className="eyebrow">Sahayak 1092</div>
             <div className="brand-name">Officer Command Center</div>
@@ -881,9 +889,7 @@ function DashboardLogin({
   return (
     <main className="auth-shell">
       <section className="auth-panel">
-        <div className="brand-mark">
-          <KeyRound size={22} />
-        </div>
+        <img className="auth-logo" src="/sahayak_logo.png" alt="Sahayak 1092" />
         <div>
           <div className="section-kicker">Protected command center</div>
           <h1 className="auth-title">Enter dashboard access key.</h1>
@@ -1020,11 +1026,12 @@ function ActiveCalls({
   );
 }
 
-function Mini({ label, value }: { label: string; value: string }) {
+function Mini({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return (
-    <div className="mini">
+    <div className="mini" title={detail}>
       <div className="table-label">{label}</div>
       <div className="mini-value">{value}</div>
+      {detail && <div className="mini-detail">{detail}</div>}
     </div>
   );
 }
@@ -1375,10 +1382,16 @@ function HealthPanel({ health }: { health: AnyRecord | null }) {
     vectorAvailable === true
       ? "ready"
       : vectorAvailable === "not_probed"
-        ? "not probed"
+        ? "configured"
         : persistence.vector_db?.configured
           ? "configured"
           : "local";
+  const vectorDetail =
+    vectorAvailable === true
+      ? "pgvector search tested"
+      : persistence.vector_db?.configured
+        ? "pgvector configured"
+        : "using local fallback";
   return (
     <section className="panel">
       <div className="section-header">
@@ -1394,7 +1407,7 @@ function HealthPanel({ health }: { health: AnyRecord | null }) {
         <Mini label="Current TTS" value={voice.tts?.provider || "none"} />
         <Mini label="Supabase" value={supabaseLabel} />
         <Mini label="Redis" value={redisLabel} />
-        <Mini label="Vector" value={vectorLabel} />
+        <Mini label="Vector" value={vectorLabel} detail={vectorDetail} />
       </div>
     </section>
   );
