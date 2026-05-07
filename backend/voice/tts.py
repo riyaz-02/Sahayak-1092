@@ -105,20 +105,48 @@ COMMON_TTS_PHRASES = {
         "Redirecting you to Police now. Please hold.",
         "Redirecting you to Ambulance now. Please hold.",
         "Redirecting you to Fire Services now. Please hold.",
+        "Okay, I understand.",
+        "Yes, I'm listening.",
+        "Got it.",
+        "I see, please go on.",
     },
     "hindi": {
         "कृपया हाँ या नहीं कहें.",
         "कृपया एक क्षण प्रतीक्षा करें.",
         "धन्यवाद.",
         "कृपया बताइए कि क्या गलत था.",
+        "हाँ जी, समझ रहे हैं.",
+        "हाँ, बताइए.",
+        "ठीक है, आगे बताइए.",
+        "समझ गया.",
     },
     "kannada": {
         "ದಯವಿಟ್ಟು ಹೌದು ಅಥವಾ ಇಲ್ಲ ಎಂದು ಹೇಳಿ.",
         "ದಯವಿಟ್ಟು ಒಂದು ಕ್ಷಣ ಕಾಯಿರಿ.",
         "ಧನ್ಯವಾದಗಳು.",
         "ದಯವಿಟ್ಟು ಏನು ತಪ್ಪಾಗಿದೆ ಎಂದು ಹೇಳಿ.",
+        "ಹೌದು, ಹೇಳಿ.",
+        "ಅರ್ಥವಾಯಿತು.",
     },
 }
+
+# Filler responses by language — played IMMEDIATELY after STT while LLM processes.
+# Must be short, natural, human-sounding — NOT "please wait" robotic messages.
+FILLER_PHRASES = {
+    "hindi":     "हाँ जी, समझ रहे हैं.",
+    "english":   "Yes, I'm listening.",
+    "kannada":   "ಹೌದು, ಹೇಳಿ.",
+    "telugu":    "అవును, చెప్పండి.",
+    "tamil":     "ஆம், சொல்லுங்கள்.",
+    "bengali":   "হ্যাঁ, বলুন.",
+    "marathi":   "हो, सांगा.",
+    "gujarati":  "હા, કહો.",
+    "punjabi":   "ਹਾਂ, ਦੱਸੋ.",
+    "malayalam": "ഹ്, പറയൂ.",
+    "urdu":      "ہاں، بتائیں.",
+    "odia":      "ହଁ, କୁହନ୍ତୁ.",
+}
+
 
 
 def _language_key(language: str | None) -> str:

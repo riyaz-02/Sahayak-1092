@@ -208,7 +208,14 @@ class MediaStreamHandler:
             self.is_speaking = False
 
     async def _process_utterance(self) -> None:
-        """Process a complete utterance from audio to spoken response."""
+        """Process a complete utterance from audio to spoken response.
+
+        Pipeline (optimised for human-like latency):
+        1. STT  — transcribe audio
+        2. PARALLEL: filler TTS synthesis + LLM decision engine start together
+        3. Play filler audio as soon as it is ready (hides LLM latency)
+        4. Await LLM result, play full response
+        """
 
         if self.processing or not self.audio_buffer:
             return
@@ -224,6 +231,7 @@ class MediaStreamHandler:
             call_state = get_or_create_call(self.call_sid, self.caller_number)
             pcm_data = mulaw_to_pcm16(bytes(self.audio_buffer))
 
+            # ── Step 1: STT ────────────────────────────────────────────
             stt_result = await transcribe_audio_with_fallback(pcm_data, call_state.language)
             if not stt_result.text:
                 call_repository.append_call_event(
@@ -248,9 +256,7 @@ class MediaStreamHandler:
                 call_state=call_state,
             )
 
-            # ── Language fast-update from STT provider detection ──────────
-            # If Sarvam detected a language during transcription, update
-            # call_state.language immediately so TTS responds in the right language.
+            # Language switch from Sarvam detection
             if stt_result.detected_language and stt_result.detected_language != call_state.language:
                 old_lang = call_state.language
                 call_state.language = stt_result.detected_language
@@ -272,18 +278,62 @@ class MediaStreamHandler:
                     to_lang=stt_result.detected_language,
                 )
 
+            # ── Step 2: PARALLEL — filler TTS + LLM decision ──────────
+            # The filler hides LLM processing time from the caller.
+            # Emergency calls skip the filler to respond instantly.
+            from backend.voice.tts import FILLER_PHRASES, synthesize_speech_with_fallback as _synth
+
+            lang = call_state.language
+            filler_text = FILLER_PHRASES.get(lang, FILLER_PHRASES.get("hindi", ""))
             decision_started_at = time.perf_counter()
-            result = await sahayak_agent.handle_text_turn(
-                call_sid=self.call_sid,
-                text=stt_result.text,
-                caller_number=self.caller_number,
-                language=call_state.language,
-                channel="voice",
-                metadata={
-                    "stream_sid": self.stream_sid,
-                    "stt_provider": stt_result.provider,
-                },
-            )
+
+            # Determine if this is likely an emergency from a quick keyword check
+            _emergency_words = {
+                "accident", "fire", "ambulance", "injured", "bleeding",
+                "दुर्घटना", "आग", "घायल", "फंस", "अटक", "एम्बुलेंस",
+                "ಅಪಘಾತ", "ಬೆಂಕಿ", "ಆಂಬ್ಯುಲೆನ್ಸ್",
+            }
+            text_lower = stt_result.text.lower()
+            is_likely_emergency = any(w in text_lower for w in _emergency_words)
+
+            if filler_text and not is_likely_emergency:
+                # Run filler synthesis and LLM in parallel
+                filler_task = asyncio.create_task(_synth(filler_text, lang))
+                llm_task = asyncio.create_task(
+                    sahayak_agent.handle_text_turn(
+                        call_sid=self.call_sid,
+                        text=stt_result.text,
+                        caller_number=self.caller_number,
+                        language=lang,
+                        channel="voice",
+                        metadata={
+                            "stream_sid": self.stream_sid,
+                            "stt_provider": stt_result.provider,
+                        },
+                    )
+                )
+
+                # Play filler as soon as it's ready (doesn't wait for LLM)
+                filler_tts = await filler_task
+                if filler_tts and filler_tts.audio:
+                    await self._send_audio(filler_tts.audio)
+
+                # Now await the LLM result (may already be done)
+                result = await llm_task
+            else:
+                # Emergency — no filler, go straight to LLM for fastest response
+                result = await sahayak_agent.handle_text_turn(
+                    call_sid=self.call_sid,
+                    text=stt_result.text,
+                    caller_number=self.caller_number,
+                    language=lang,
+                    channel="voice",
+                    metadata={
+                        "stream_sid": self.stream_sid,
+                        "stt_provider": stt_result.provider,
+                    },
+                )
+
             decision_latency_ms = _elapsed_ms(decision_started_at)
 
             response_text = result["response_text"]
@@ -334,6 +384,7 @@ class MediaStreamHandler:
             json_log("utterance_processing_error", call_sid=self.call_sid, error=str(exc))
         finally:
             self.processing = False
+
 
     async def _handle_dtmf(self, digit: str) -> None:
         """Handle DTMF tones for surge IVR during queue state."""

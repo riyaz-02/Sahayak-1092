@@ -132,8 +132,8 @@ class Settings:
     high_help_alert_timeout_sec: int = 120
     high_help_alert_demo_timeout_sec: int = 20
     vad_silence_threshold: float = 0.02
-    vad_silence_duration_ms: int = 1500
-    vad_buffer_max_duration_ms: int = 15000
+    vad_silence_duration_ms: int = 700
+    vad_buffer_max_duration_ms: int = 12000
 
     @property
     def ws_base_url(self) -> str:
