@@ -105,6 +105,9 @@ class Settings:
     )
     voice_provider_timeout_sec: float = 12.0
     tts_phrase_cache_enabled: bool = True
+    voice_scripted_demo_enabled: bool = False
+    voice_script_language: str = ""
+    voice_filler_enabled: bool = True
 
     supabase_url: str = ""
     supabase_key: str = ""
@@ -217,6 +220,12 @@ def get_settings() -> Settings:
             os.getenv("TTS_PHRASE_CACHE_ENABLED", os.getenv("PREGENERATED_TTS_ENABLED")),
             True,
         ),
+        voice_scripted_demo_enabled=_as_bool(
+            os.getenv("VOICE_SCRIPTED_DEMO_ENABLED", os.getenv("SCRIPTED_DEMO_ENABLED")),
+            False,
+        ),
+        voice_script_language=os.getenv("VOICE_SCRIPT_LANGUAGE", "").strip().lower(),
+        voice_filler_enabled=_as_bool(os.getenv("VOICE_FILLER_ENABLED"), True),
         supabase_url=os.getenv("SUPABASE_URL", ""),
         supabase_key=(
             os.getenv("SUPABASE_SERVICE_ROLE_KEY")

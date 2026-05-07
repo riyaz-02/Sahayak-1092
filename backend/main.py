@@ -65,6 +65,10 @@ from backend.security import (
     validate_twilio_request,
 )
 from backend.routing.transfer_service import TransferRequest, get_transfer_service
+from backend.voice.scripted_demo import (
+    preview_scripted_voice_turn,
+    scripted_demo_language_is_auto,
+)
 from backend import supabase_client as db
 
 load_dotenv()
@@ -508,6 +512,45 @@ async def test_pipeline(request: Request):
             "high_help_alert_at": result["call_state"].get("high_help_alert_at"),
         },
     })
+
+
+@app.get("/api/voice-script/status")
+async def api_voice_script_status():
+    """Return scripted voice demo readiness for deployed-backend checks."""
+
+    language_mode = settings.voice_script_language or "auto"
+    return JSONResponse(
+        {
+            "scripted_demo_enabled": settings.voice_scripted_demo_enabled,
+            "language_mode": language_mode,
+            "auto_language": scripted_demo_language_is_auto(settings),
+            "stt_language_hint": "unknown" if scripted_demo_language_is_auto(settings) else language_mode,
+            "filler_enabled": settings.voice_filler_enabled,
+            "stt_provider_order": list(settings.stt_provider_order),
+            "tts_provider_order": list(settings.tts_provider_order),
+        }
+    )
+
+
+@app.post("/api/voice-script/preview")
+async def api_voice_script_preview(request: Request):
+    """Preview the scripted voice response without placing a call."""
+
+    body = await request.json()
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="'text' is required")
+
+    return JSONResponse(
+        preview_scripted_voice_turn(
+            text=text,
+            language=str(body.get("language") or ""),
+            phase=str(body.get("phase") or ""),
+            previous_category=str(body.get("previous_category") or ""),
+            previous_summary=str(body.get("previous_summary") or ""),
+            settings=settings,
+        )
+    )
 
 
 @app.get("/api/agent/tools")

@@ -28,6 +28,7 @@ CALL_EVENT_TYPES = {
     "stt_completed",
     "stt_failed",
     "analysis_completed",
+    "scripted_demo_matched",
     "similarity_search_completed",
     "similarity_match_found",
     "vachan_requested",

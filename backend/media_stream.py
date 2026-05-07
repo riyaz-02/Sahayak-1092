@@ -35,6 +35,15 @@ from backend.voice.audio_codec import (
     pcm16_to_mulaw as _pcm16_to_mulaw,
 )
 from backend.voice.stt import STTResult, transcribe_audio_with_fallback
+from backend.voice.scripted_demo import (
+    infer_scripted_language_from_text,
+    process_scripted_voice_turn,
+    scripted_demo_greeting,
+    scripted_demo_language,
+    scripted_demo_language_is_auto,
+    scripted_demo_stt_language,
+    scripted_voice_demo_enabled,
+)
 from backend.voice.tts import TTSResult, synthesize_speech_with_fallback
 from backend.voice.vad import normalized_energy_from_mulaw
 
@@ -168,7 +177,11 @@ class MediaStreamHandler:
         """Send the initial Sahayak greeting to the caller."""
 
         call_state = get_or_create_call(self.call_sid, self.caller_number)
-        greeting = get_greeting(call_state.language)
+        if scripted_voice_demo_enabled(settings):
+            call_state.language = scripted_demo_language(call_state.language, call_state, settings)
+            greeting = scripted_demo_greeting(call_state.language, settings)
+        else:
+            greeting = get_greeting(call_state.language)
         call_state.transcript.append({"role": "sahayak", "text": greeting})
         call_repository.update_call_state(call_state)
         call_repository.append_call_event(
@@ -230,16 +243,22 @@ class MediaStreamHandler:
         try:
             call_state = get_or_create_call(self.call_sid, self.caller_number)
             pcm_data = mulaw_to_pcm16(bytes(self.audio_buffer))
+            scripted_mode = scripted_voice_demo_enabled(settings)
+            stt_language = (
+                scripted_demo_stt_language(call_state, settings)
+                if scripted_mode
+                else call_state.language
+            )
 
             # ── Step 1: STT ────────────────────────────────────────────
-            stt_result = await transcribe_audio_with_fallback(pcm_data, call_state.language)
+            stt_result = await transcribe_audio_with_fallback(pcm_data, stt_language)
             if not stt_result.text:
                 call_repository.append_call_event(
                     call_sid=self.call_sid,
                     event_type="stt_failed",
                     payload={
                         **stt_result.as_event_payload(),
-                        "language": call_state.language,
+                        "language": stt_language,
                     },
                     call_state=call_state,
                 )
@@ -251,21 +270,32 @@ class MediaStreamHandler:
                 event_type="stt_completed",
                 payload={
                     **stt_result.as_event_payload(),
-                    "language": call_state.language,
+                    "language": stt_language,
                 },
                 call_state=call_state,
             )
 
             # Language switch from Sarvam detection
-            if stt_result.detected_language and stt_result.detected_language != call_state.language:
+            detected_language = stt_result.detected_language
+            if scripted_mode and scripted_demo_language_is_auto(settings):
+                inferred_language = infer_scripted_language_from_text(
+                    stt_result.text,
+                    fallback=call_state.language,
+                )
+                if inferred_language != call_state.language:
+                    detected_language = inferred_language
+                else:
+                    detected_language = detected_language or inferred_language
+
+            if detected_language and detected_language != call_state.language:
                 old_lang = call_state.language
-                call_state.language = stt_result.detected_language
+                call_state.language = detected_language
                 call_repository.update_call_state(call_state)
                 call_repository.append_call_event(
                     call_sid=self.call_sid,
                     event_type="language_detected",
                     payload={
-                        "detected": stt_result.detected_language,
+                        "detected": detected_language,
                         "previous": old_lang,
                         "source": stt_result.provider,
                     },
@@ -275,32 +305,58 @@ class MediaStreamHandler:
                     "language_switched",
                     call_sid=self.call_sid,
                     from_lang=old_lang,
-                    to_lang=stt_result.detected_language,
+                    to_lang=detected_language,
                 )
 
-            # ── Step 2: PARALLEL — filler TTS + LLM decision ──────────
-            # The filler hides LLM processing time from the caller.
-            # Emergency calls skip the filler to respond instantly.
-            from backend.voice.tts import FILLER_PHRASES, synthesize_speech_with_fallback as _synth
-
+            # ── Step 2: decide response ───────────────────────────────
             lang = call_state.language
-            filler_text = FILLER_PHRASES.get(lang, FILLER_PHRASES.get("hindi", ""))
             decision_started_at = time.perf_counter()
 
-            # Determine if this is likely an emergency from a quick keyword check
-            _emergency_words = {
-                "accident", "fire", "ambulance", "injured", "bleeding",
-                "दुर्घटना", "आग", "घायल", "फंस", "अटक", "एम्बुलेंस",
-                "ಅಪಘಾತ", "ಬೆಂಕಿ", "ಆಂಬ್ಯುಲೆನ್ಸ್",
-            }
-            text_lower = stt_result.text.lower()
-            is_likely_emergency = any(w in text_lower for w in _emergency_words)
+            if scripted_voice_demo_enabled(settings):
+                result = process_scripted_voice_turn(
+                    call_state=call_state,
+                    text=stt_result.text,
+                    language=lang,
+                    settings=settings,
+                )
+            else:
+                # The filler hides LLM processing time from the caller. It can be
+                # disabled for recordings where exact script timing matters.
+                from backend.voice.tts import FILLER_PHRASES, synthesize_speech_with_fallback as _synth
 
-            if filler_text and not is_likely_emergency:
-                # Run filler synthesis and LLM in parallel
-                filler_task = asyncio.create_task(_synth(filler_text, lang))
-                llm_task = asyncio.create_task(
-                    sahayak_agent.handle_text_turn(
+                filler_text = FILLER_PHRASES.get(lang, FILLER_PHRASES.get("hindi", ""))
+
+                _emergency_words = {
+                    "accident", "fire", "ambulance", "injured", "bleeding",
+                    "दुर्घटना", "आग", "घायल", "फंस", "अटक", "एम्बुलेंस",
+                    "ಅಪಘಾತ", "ಬೆಂಕಿ", "ಆಂಬ್ಯುಲೆನ್ಸ್",
+                }
+                text_lower = stt_result.text.lower()
+                is_likely_emergency = any(w in text_lower for w in _emergency_words)
+
+                if settings.voice_filler_enabled and filler_text and not is_likely_emergency:
+                    filler_task = asyncio.create_task(_synth(filler_text, lang))
+                    llm_task = asyncio.create_task(
+                        sahayak_agent.handle_text_turn(
+                            call_sid=self.call_sid,
+                            text=stt_result.text,
+                            caller_number=self.caller_number,
+                            language=lang,
+                            channel="voice",
+                            metadata={
+                                "stream_sid": self.stream_sid,
+                                "stt_provider": stt_result.provider,
+                            },
+                        )
+                    )
+
+                    filler_tts = await filler_task
+                    if filler_tts and filler_tts.audio:
+                        await self._send_audio(filler_tts.audio)
+
+                    result = await llm_task
+                else:
+                    result = await sahayak_agent.handle_text_turn(
                         call_sid=self.call_sid,
                         text=stt_result.text,
                         caller_number=self.caller_number,
@@ -311,28 +367,6 @@ class MediaStreamHandler:
                             "stt_provider": stt_result.provider,
                         },
                     )
-                )
-
-                # Play filler as soon as it's ready (doesn't wait for LLM)
-                filler_tts = await filler_task
-                if filler_tts and filler_tts.audio:
-                    await self._send_audio(filler_tts.audio)
-
-                # Now await the LLM result (may already be done)
-                result = await llm_task
-            else:
-                # Emergency — no filler, go straight to LLM for fastest response
-                result = await sahayak_agent.handle_text_turn(
-                    call_sid=self.call_sid,
-                    text=stt_result.text,
-                    caller_number=self.caller_number,
-                    language=lang,
-                    channel="voice",
-                    metadata={
-                        "stream_sid": self.stream_sid,
-                        "stt_provider": stt_result.provider,
-                    },
-                )
 
             decision_latency_ms = _elapsed_ms(decision_started_at)
 

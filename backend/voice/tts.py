@@ -130,6 +130,15 @@ COMMON_TTS_PHRASES = {
     },
 }
 
+try:
+    from backend.voice.scripted_demo import SCRIPTED_DEMO_COMMON_PHRASES
+
+    for _language, _phrases in SCRIPTED_DEMO_COMMON_PHRASES.items():
+        COMMON_TTS_PHRASES.setdefault(_language, set()).update(_phrases)
+except Exception:
+    # Scripted demo support is optional; TTS should remain usable if it cannot load.
+    pass
+
 # Filler responses by language — played IMMEDIATELY after STT while LLM processes.
 # Must be short, natural, human-sounding — NOT "please wait" robotic messages.
 FILLER_PHRASES = {
