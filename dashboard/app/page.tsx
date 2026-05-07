@@ -5,8 +5,9 @@ import "./landing.css";
 export default function LandingPage() {
 
   useEffect(() => {
-    const el = document.getElementById("typing-el");
-    if (!el) return;
+    const elRaw = document.getElementById("typing-el");
+    if (!elRaw) return;
+    const el: HTMLElement = elRaw;   // narrowed — safe inside nested fn
     const phrases = [
       "Multilingual Voice AI for Karnataka",
       "Kannada, Hindi, English \u2014 All Dialects",
