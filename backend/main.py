@@ -122,6 +122,8 @@ def _twilio_outbound_error_detail(exc: Exception) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown tasks."""
+    import asyncio as _asyncio
+
     json_log(
         "app_start",
         base_url=BASE_URL,
@@ -135,6 +137,41 @@ async def lifespan(app: FastAPI):
         await db.seed_demo_data()
     except Exception as exc:
         json_log("seed_skipped", error=str(exc))
+
+    # Pre-warm TTS phrase cache so the first caller hears a response immediately
+    # instead of waiting for Sarvam's network round-trip on every cold phrase.
+    async def _warm_tts_cache():
+        from backend.voice.tts import warm_common_phrase_cache
+        from backend.voice.scripted_demo import (
+            scripted_demo_greeting,
+            scripted_voice_demo_enabled,
+        )
+        from backend.voice.tts import synthesize_speech_with_fallback, phrase_audio_cache
+
+        langs_to_warm = ["english", "hindi", "kannada"]
+        for lang in langs_to_warm:
+            try:
+                stats = await warm_common_phrase_cache(lang)
+                json_log("tts_cache_warmed", language=lang, **stats)
+            except Exception as exc:
+                json_log("tts_cache_warm_failed", language=lang, error=str(exc))
+
+        # Also pre-synthesize the scripted demo greeting for each language
+        if scripted_voice_demo_enabled(settings):
+            for lang in langs_to_warm:
+                try:
+                    greeting = scripted_demo_greeting(lang, settings)
+                    cached = phrase_audio_cache.get(greeting, lang)
+                    if not cached:
+                        result = await synthesize_speech_with_fallback(greeting, lang)
+                        if result.audio:
+                            phrase_audio_cache.set(greeting, lang, result.audio)
+                            json_log("greeting_prewarmed", language=lang, provider=result.provider)
+                except Exception as exc:
+                    json_log("greeting_prewarm_failed", language=lang, error=str(exc))
+
+    # Run warmup in background — don't block server startup
+    _asyncio.create_task(_warm_tts_cache())
 
     yield  # app running
 
