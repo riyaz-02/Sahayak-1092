@@ -20,7 +20,15 @@ import {
   RefreshCw,
   Send,
   ShieldCheck,
-  Users
+  Users,
+  X,
+  Eye,
+  Phone,
+  MessageSquare,
+  Clock,
+  Tag,
+  Zap,
+  Globe
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -262,6 +270,8 @@ export default function DashboardPage() {
   const [callStatus, setCallStatus] = useState<"idle" | "calling" | "success" | "error">("idle");
   const [callResult, setCallResult] = useState<AnyRecord | null>(null);
   const [callError, setCallError] = useState("");
+  // ── Complaint modal state ─────────────────────────────
+  const [selectedComplaint, setSelectedComplaint] = useState<AnyRecord | null>(null);
   // ────────────────────────────────────────────────────
   const dataRef = useRef<DashboardData>(emptyData);
   const dashboardKeyRef = useRef("");
@@ -788,7 +798,7 @@ export default function DashboardPage() {
         <div className={`toast ${error ? "error" : ""}`}>{error || toast}</div>
       )}
 
-      <section className="workspace">
+      <section className={`workspace${tab === "complaints" ? " workspace-full" : ""}`}>
         <div className="main-stack">
           {(tab === "overview" || tab === "calls") && (
             <ActiveCalls
@@ -807,7 +817,23 @@ export default function DashboardPage() {
 
           {tab === "officers" && <OfficerPanel agents={data.agents} onToggle={toggleAgent} />}
 
-          {tab === "complaints" && <ComplaintPanel complaints={data.complaints} />}
+          {tab === "complaints" && (
+            <ComplaintPanel
+              complaints={data.complaints}
+              callLogs={data.callLogs}
+              onViewDetail={setSelectedComplaint}
+            />
+          )}
+
+          {selectedComplaint && (
+            <ComplaintDetailModal
+              complaint={selectedComplaint}
+              callLogs={data.callLogs}
+              onClose={() => setSelectedComplaint(null)}
+              dashboardKey={dashboardKeyRef.current}
+            />
+          )}
+
 
           {tab === "knowledge" && <KnowledgePanel cases={data.cases} />}
 
@@ -851,17 +877,19 @@ export default function DashboardPage() {
           )}
         </div>
 
-        <aside className="side-stack">
-          <CorrectionPanel
-            selectedCall={selectedCall}
-            correction={correction}
-            setCorrection={setCorrection}
-            onApply={applyCorrection}
-            onLearn={learnFromCall}
-          />
-          <HealthPanel health={data.health} />
-          <AuditPanel events={data.events.slice(0, 6)} compact />
-        </aside>
+        {tab !== "complaints" && (
+          <aside className="side-stack">
+            <CorrectionPanel
+              selectedCall={selectedCall}
+              correction={correction}
+              setCorrection={setCorrection}
+              onApply={applyCorrection}
+              onLearn={learnFromCall}
+            />
+            <HealthPanel health={data.health} />
+            <AuditPanel events={data.events.slice(0, 6)} compact />
+          </aside>
+        )}
       </section>
     </main>
   );
@@ -1209,31 +1237,583 @@ function CorrectionPanel({
   );
 }
 
-function ComplaintPanel({ complaints }: { complaints: AnyRecord[] }) {
+// ── Complaint status lifecycle ──────────────────────────
+const COMPLAINT_STAGES: Array<{ key: string; label: string }> = [
+  { key: "registered",   label: "Registered"    },
+  { key: "in_progress",  label: "In Progress"   },
+  { key: "action_taken", label: "Action Taken"  },
+  { key: "resolved",     label: "Resolved"      },
+  { key: "closed",       label: "Closed"        },
+];
+
+function stageIndex(status?: string): number {
+  const idx = COMPLAINT_STAGES.findIndex((s) => s.key === status);
+  return idx === -1 ? 0 : idx;
+}
+
+function categoryLabel(cat?: string): string {
+  const map: Record<string, string> = {
+    theft: "Theft / Loss",
+    accident: "Accident",
+    domestic: "Domestic Violence",
+    cyber: "Cyber / Financial Fraud",
+    noise: "Noise Disturbance",
+    missing_person: "Missing Person",
+    suspicious_activity: "Suspicious Activity",
+    medical: "Medical Emergency",
+    fire: "Fire Emergency",
+    traffic: "Traffic Issue",
+    harassment: "Harassment",
+    civic: "Civic / Municipal",
+    general: "General",
+  };
+  return map[(cat || "").toLowerCase()] || (cat || "General");
+}
+
+function urgencyLabel(u?: number): string {
+  if (u === undefined || u === null) return "—";
+  if (u >= 0.9) return "Critical";
+  if (u >= 0.7) return "High";
+  if (u >= 0.4) return "Medium";
+  return "Low";
+}
+
+function urgencyTone(u?: number): string {
+  if (u === undefined || u === null) return "";
+  if (u >= 0.9) return "red";
+  if (u >= 0.7) return "red";
+  if (u >= 0.4) return "blue";
+  return "teal";
+}
+
+function timelineLabel(eventType: string): string {
+  const map: Record<string, string> = {
+    complaint_registered: "Complaint registered by AI",
+    government_payload_created: "Forwarded to government registry",
+    status_updated: "Status updated",
+    note_added: "Officer note added",
+    officer_action: "Officer action recorded",
+    complaint_resolved: "Complaint resolved",
+  };
+  return map[eventType] || eventType.replace(/_/g, " ");
+}
+
+function formatTs(iso?: string): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("en-IN", {
+    day: "2-digit", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function ComplaintPanel({
+  complaints,
+  callLogs,
+  onViewDetail,
+}: {
+  complaints: AnyRecord[];
+  callLogs: AnyRecord[];
+  onViewDetail: (complaint: AnyRecord) => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+
+  const filtered = complaints.filter((c) => {
+    const matchStatus = statusFilter === "all" || c.status === statusFilter;
+    if (!filter) return matchStatus;
+    const s = filter.toLowerCase();
+    return matchStatus && (
+      (c.reference_id || "").toLowerCase().includes(s) ||
+      (c.category || "").toLowerCase().includes(s) ||
+      (c.description || "").toLowerCase().includes(s) ||
+      (c.caller_number || "").toLowerCase().includes(s)
+    );
+  });
+
+  const counts = COMPLAINT_STAGES.reduce<Record<string, number>>((acc, st) => {
+    acc[st.key] = complaints.filter((c) => c.status === st.key).length;
+    return acc;
+  }, {});
+
   return (
     <section className="panel">
       <div className="section-header">
         <div>
-          <div className="section-kicker">Citizen actions</div>
-          <h2 className="section-title">Complaints</h2>
+          <div className="section-kicker">Citizen complaints</div>
+          <h2 className="section-title">Complaint Registry</h2>
+          <p className="section-copy">
+            All complaints registered by the AI system. Click a complaint to view details, take
+            action, or mark it resolved.
+          </p>
         </div>
-        <Badge tone="teal">{complaints.length} records</Badge>
+        <Badge tone="teal">{complaints.length} total</Badge>
       </div>
-      <div className="complaint-list">
-        {complaints.map((complaint) => (
-          <article className="complaint-row" key={complaint.id || complaint.reference_id}>
-            <div className="row-top">
-              <div>
-                <div className="caller">{complaint.category || "general"}</div>
-                <div className="hash">{complaint.reference_id}</div>
-              </div>
-              <Badge tone={statusTone(complaint.status)}>{complaint.status || "registered"}</Badge>
-            </div>
-            <p className="summary">{complaint.description || "No description available."}</p>
-          </article>
+
+      {/* Stage summary bar */}
+      <div className="complaint-stage-bar">
+        {COMPLAINT_STAGES.map((st) => (
+          <button
+            key={st.key}
+            className={`stage-chip ${statusFilter === st.key ? "active" : ""}`}
+            onClick={() => setStatusFilter((prev) => prev === st.key ? "all" : st.key)}
+          >
+            <span className="stage-chip-label">{st.label}</span>
+            <span className="stage-chip-count">{counts[st.key] ?? 0}</span>
+          </button>
         ))}
+        {statusFilter !== "all" && (
+          <button className="stage-chip clear" onClick={() => setStatusFilter("all")}>
+            Show all
+          </button>
+        )}
       </div>
+
+      {/* Search */}
+      <div className="complaint-search">
+        <input
+          className="input"
+          placeholder="Search by reference ID, category, or caller number"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        />
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="empty">
+          {complaints.length === 0
+            ? "No complaints registered yet. They appear here when Sahayak AI resolves a call."
+            : "No complaints match the current filter."}
+        </div>
+      ) : (
+        <div className="complaint-table-wrap">
+          <table className="complaint-table">
+            <thead>
+              <tr>
+                <th>Reference ID</th>
+                <th>Category</th>
+                <th>Caller</th>
+                <th>Description</th>
+                <th>Urgency</th>
+                <th>Stage</th>
+                <th>Registered</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((complaint) => {
+                const log = callLogs.find((l) => l.call_sid === complaint.call_sid);
+                const caller = complaint.caller_number || log?.caller_number || "Unknown";
+                const urgency = complaint.urgency ?? log?.urgency;
+                const stageIdx = stageIndex(complaint.status);
+                return (
+                  <tr
+                    key={complaint.id || complaint.reference_id}
+                    className="complaint-tr"
+                    onClick={() => onViewDetail({ ...complaint, _call_log: log })}
+                    style={{ cursor: "pointer" }}
+                  >
+                    <td>
+                      <span className="hash" style={{ fontSize: 11 }}>
+                        {complaint.reference_id || "—"}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{ fontWeight: 700, fontSize: 13 }}>
+                        {categoryLabel(complaint.category)}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="complaint-caller">{caller}</span>
+                    </td>
+                    <td className="complaint-desc">
+                      {(complaint.description || "—").slice(0, 72)}
+                      {(complaint.description || "").length > 72 ? "…" : ""}
+                    </td>
+                    <td>
+                      <Badge tone={urgencyTone(urgency)}>{urgencyLabel(urgency)}</Badge>
+                    </td>
+                    <td>
+                      <div className="stage-pill-row">
+                        {COMPLAINT_STAGES.slice(0, 4).map((st, i) => (
+                          <div
+                            key={st.key}
+                            className={`stage-dot ${i <= stageIdx ? "done" : ""} ${complaint.status === st.key ? "current" : ""}`}
+                            title={st.label}
+                          />
+                        ))}
+                      </div>
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 3 }}>
+                        {COMPLAINT_STAGES.find((s) => s.key === complaint.status)?.label || "Registered"}
+                      </div>
+                    </td>
+                    <td style={{ whiteSpace: "nowrap", fontSize: 11, color: "var(--text-secondary)" }}>
+                      {formatTs(complaint.created_at)}
+                    </td>
+                    <td>
+                      <button
+                        className="btn ghost"
+                        style={{ fontSize: 12, whiteSpace: "nowrap" }}
+                        onClick={(e) => { e.stopPropagation(); onViewDetail({ ...complaint, _call_log: log }); }}
+                      >
+                        <Eye size={13} />
+                        View
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
+  );
+}
+
+function ComplaintDetailModal({
+  complaint: initialComplaint,
+  callLogs,
+  onClose,
+  dashboardKey,
+}: {
+  complaint: AnyRecord;
+  callLogs: AnyRecord[];
+  onClose: () => void;
+  dashboardKey: string;
+}) {
+  const [complaint, setComplaint] = useState<AnyRecord>(initialComplaint);
+  const [timeline, setTimeline] = useState<AnyRecord[]>([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+  const [actionNote, setActionNote] = useState("");
+  const [selectedStatus, setSelectedStatus] = useState(complaint.status || "registered");
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+  const [noteText, setNoteText] = useState("");
+  const [noteSubmitting, setNoteSubmitting] = useState(false);
+
+  const log = complaint._call_log || callLogs.find((l) => l.call_sid === complaint.call_sid);
+  const urgency = complaint.urgency ?? log?.urgency;
+  const stageIdx = stageIndex(complaint.status);
+
+  // Load timeline on mount
+  useEffect(() => {
+    if (!complaint.reference_id) return;
+    setTimelineLoading(true);
+    apiGet<AnyRecord>(
+      `/api/complaints/${complaint.reference_id}/timeline`,
+      { timeline: [] },
+      { dashboardKey }
+    ).then((r) => {
+      setTimeline((r.timeline as AnyRecord[]) || []);
+      setTimelineLoading(false);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [complaint.reference_id]);
+
+  async function saveAction() {
+    if (!selectedStatus && !actionNote) return;
+    setSaving(true);
+    setSaveMsg("");
+    const body: AnyRecord = { officer: "dashboard" };
+    if (selectedStatus !== complaint.status) body.status = selectedStatus;
+    if (actionNote.trim()) body.action_note = actionNote.trim();
+
+    try {
+      const result = await fetch(`/api/sahayak/api/complaints/${complaint.reference_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "x-sahayak-dashboard-key": dashboardKey },
+        body: JSON.stringify(body),
+      }).then((r) => r.json());
+
+      if (result.status === "ok") {
+        setComplaint((prev) => ({ ...prev, ...body, status: selectedStatus }));
+        setActionNote("");
+        setSaveMsg("Action saved successfully.");
+        // refresh timeline
+        const tl = await apiGet<AnyRecord>(
+          `/api/complaints/${complaint.reference_id}/timeline`,
+          { timeline: [] },
+          { dashboardKey }
+        );
+        setTimeline((tl.timeline as AnyRecord[]) || []);
+      } else {
+        setSaveMsg("Failed to save action.");
+      }
+    } catch {
+      setSaveMsg("Network error. Please try again.");
+    }
+    setSaving(false);
+  }
+
+  async function submitNote() {
+    if (!noteText.trim()) return;
+    setNoteSubmitting(true);
+    try {
+      await fetch(`/api/sahayak/api/complaints/${complaint.reference_id}/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-sahayak-dashboard-key": dashboardKey },
+        body: JSON.stringify({ note: noteText.trim(), officer: "dashboard" }),
+      });
+      setNoteText("");
+      const tl = await apiGet<AnyRecord>(
+        `/api/complaints/${complaint.reference_id}/timeline`,
+        { timeline: [] },
+        { dashboardKey }
+      );
+      setTimeline((tl.timeline as AnyRecord[]) || []);
+    } catch {}
+    setNoteSubmitting(false);
+  }
+
+  return (
+    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal-panel">
+
+        {/* Header */}
+        <div className="modal-header">
+          <div>
+            <div className="section-kicker">Complaint Record</div>
+            <h2 className="section-title" style={{ marginTop: 4 }}>
+              {complaint.reference_id || "—"}
+            </h2>
+            <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Badge tone={urgencyTone(urgency)}>{urgencyLabel(urgency)} urgency</Badge>
+              <Badge tone={statusTone(complaint.status)}>
+                {COMPLAINT_STAGES.find((s) => s.key === complaint.status)?.label || "Registered"}
+              </Badge>
+              <span style={{ fontSize: 12, color: "var(--text-secondary)", alignSelf: "center" }}>
+                {categoryLabel(complaint.category)}
+              </span>
+            </div>
+          </div>
+          <button className="btn ghost" onClick={onClose} style={{ padding: "0 10px", minHeight: 34, flexShrink: 0 }}>
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="modal-body">
+
+          {/* Progress tracker */}
+          <div className="modal-section">
+            <div className="modal-section-title">Current Stage</div>
+            <div className="complaint-progress-track">
+              {COMPLAINT_STAGES.map((st, i) => (
+                <div key={st.key} className="progress-step">
+                  <div className={`progress-node ${i < stageIdx ? "done" : i === stageIdx ? "active" : "pending"}`}>
+                    {i < stageIdx ? <CheckCircle2 size={14} /> : i + 1}
+                  </div>
+                  <div className={`progress-label ${i === stageIdx ? "active-label" : ""}`}>{st.label}</div>
+                  {i < COMPLAINT_STAGES.length - 1 && (
+                    <div className={`progress-line ${i < stageIdx ? "done" : ""}`} />
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Complaint details */}
+          <div className="modal-section">
+            <div className="modal-section-title">Complaint Details</div>
+            <div className="detail-grid">
+              <div className="detail-item">
+                <div className="detail-label">Caller Number</div>
+                <div className="detail-value">{complaint.caller_number || log?.caller_number || "Unknown"}</div>
+              </div>
+              <div className="detail-item">
+                <div className="detail-label">Category</div>
+                <div className="detail-value">{categoryLabel(complaint.category)}</div>
+              </div>
+              <div className="detail-item">
+                <div className="detail-label">Language</div>
+                <div className="detail-value">{complaint.language || log?.language || "—"}</div>
+              </div>
+              <div className="detail-item">
+                <div className="detail-label">Registered On</div>
+                <div className="detail-value">{formatTs(complaint.created_at)}</div>
+              </div>
+              {complaint.location && (
+                <div className="detail-item wide">
+                  <div className="detail-label">Location</div>
+                  <div className="detail-value">{complaint.location}</div>
+                </div>
+              )}
+            </div>
+            <div className="modal-text-block" style={{ marginTop: 10 }}>
+              <div className="detail-label" style={{ marginBottom: 5 }}>Description</div>
+              {complaint.description || "No description recorded."}
+            </div>
+          </div>
+
+          {/* AI Summary */}
+          {(log?.ai_summary || log?.adapted_resolution) && (
+            <div className="modal-section">
+              <div className="modal-section-title">AI Assessment</div>
+              <div className="detail-grid">
+                <div className="detail-item">
+                  <div className="detail-label">Sentiment</div>
+                  <div className="detail-value">{log?.sentiment || "—"}</div>
+                </div>
+                <div className="detail-item">
+                  <div className="detail-label">Confidence</div>
+                  <div className="detail-value">{log?.confidence !== undefined ? percent(log.confidence) : "—"}</div>
+                </div>
+                <div className="detail-item">
+                  <div className="detail-label">AI Outcome</div>
+                  <div className="detail-value">{log?.outcome || "—"}</div>
+                </div>
+              </div>
+              {log?.ai_summary && (
+                <div className="modal-text-block" style={{ marginTop: 10 }}>
+                  <div className="detail-label" style={{ marginBottom: 5 }}>AI Summary</div>
+                  {log.ai_summary}
+                </div>
+              )}
+              {log?.adapted_resolution && (
+                <div className="modal-text-block" style={{ marginTop: 8 }}>
+                  <div className="detail-label" style={{ marginBottom: 5 }}>Suggested Resolution</div>
+                  {log.adapted_resolution}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Conversation */}
+          {log?.transcript && Array.isArray(log.transcript) && log.transcript.length > 0 && (
+            <div className="modal-section">
+              <div className="modal-section-title">Caller Conversation</div>
+              <div className="transcript-box" style={{ maxHeight: 200 }}>
+                {log.transcript.map((turn: AnyRecord, i: number) => (
+                  <div
+                    key={i}
+                    className={`convo-turn ${turn.role === "ai" || turn.role === "sahayak" ? "ai-turn" : "caller-turn"}`}
+                  >
+                    <span className="convo-role">
+                      {turn.role === "ai" || turn.role === "sahayak" ? "Sahayak AI" : "Caller"}
+                    </span>
+                    {turn.text || ""}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Timeline */}
+          <div className="modal-section">
+            <div className="modal-section-title">Activity Timeline</div>
+            {timelineLoading ? (
+              <div className="detail-label">Loading timeline…</div>
+            ) : timeline.length === 0 ? (
+              <div className="empty" style={{ padding: "14px 16px" }}>No activity recorded yet.</div>
+            ) : (
+              <div className="complaint-timeline">
+                {[...timeline].sort((a, b) => (a.created_at || "").localeCompare(b.created_at || "")).map((ev, i) => (
+                  <div key={ev.id || i} className="timeline-row">
+                    <div className="timeline-dot" />
+                    <div className="timeline-content">
+                      <div className="timeline-event">{timelineLabel(ev.event_type)}</div>
+                      {ev.payload?.note && (
+                        <div className="timeline-note">{ev.payload.note}</div>
+                      )}
+                      {ev.payload?.action_note && (
+                        <div className="timeline-note">{ev.payload.action_note}</div>
+                      )}
+                      {ev.payload?.status && ev.event_type === "status_updated" && (
+                        <div className="timeline-note">
+                          Status changed to: <strong>{COMPLAINT_STAGES.find((s) => s.key === ev.payload.status)?.label || ev.payload.status}</strong>
+                        </div>
+                      )}
+                      {ev.payload?.officer && ev.payload.officer !== "dashboard" && (
+                        <div className="timeline-meta">by {ev.payload.officer}</div>
+                      )}
+                      <div className="timeline-meta">{formatTs(ev.created_at)}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Add note */}
+            <div className="action-note-row">
+              <textarea
+                className="textarea"
+                placeholder="Add an officer note (e.g. 'Dispatched patrol unit to location')"
+                value={noteText}
+                onChange={(e) => setNoteText(e.target.value)}
+                style={{ minHeight: 72 }}
+              />
+              <button
+                className="btn ghost"
+                onClick={submitNote}
+                disabled={!noteText.trim() || noteSubmitting}
+                style={{ alignSelf: "flex-end" }}
+              >
+                <Send size={14} />
+                {noteSubmitting ? "Adding…" : "Add Note"}
+              </button>
+            </div>
+          </div>
+
+          {/* Action panel */}
+          <div className="modal-section action-panel">
+            <div className="modal-section-title">Take Action</div>
+            <div className="action-form">
+              <div className="field">
+                <span className="field-label">Update Status</span>
+                <select
+                  className="select"
+                  value={selectedStatus}
+                  onChange={(e) => setSelectedStatus(e.target.value)}
+                >
+                  {COMPLAINT_STAGES.map((st) => (
+                    <option key={st.key} value={st.key}>{st.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="field">
+                <span className="field-label">Action Taken (optional note)</span>
+                <input
+                  className="input"
+                  placeholder="Describe the action taken"
+                  value={actionNote}
+                  onChange={(e) => setActionNote(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="button-row" style={{ marginTop: 10 }}>
+              <button
+                className="btn primary"
+                onClick={saveAction}
+                disabled={saving || (selectedStatus === complaint.status && !actionNote.trim())}
+              >
+                <CheckCircle2 size={15} />
+                {saving ? "Saving…" : "Save Action"}
+              </button>
+              {complaint.status !== "resolved" && (
+                <button
+                  className="btn ghost"
+                  onClick={() => { setSelectedStatus("resolved"); setTimeout(saveAction, 0); }}
+                  disabled={saving}
+                >
+                  <BadgeCheck size={15} />
+                  Mark Resolved
+                </button>
+              )}
+            </div>
+            {saveMsg && (
+              <div className={`toast ${saveMsg.includes("Failed") || saveMsg.includes("error") ? "error" : ""}`} style={{ marginTop: 10 }}>
+                {saveMsg}
+              </div>
+            )}
+          </div>
+
+          {/* Reference footer */}
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11, color: "var(--text-secondary)", borderTop: "1px solid var(--border)", paddingTop: 10 }}>
+            {complaint.call_sid && <span>Call SID: <span className="hash">{complaint.call_sid}</span></span>}
+            {complaint.id && <span>Record ID: <span className="hash">{complaint.id}</span></span>}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 

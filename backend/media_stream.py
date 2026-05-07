@@ -248,6 +248,30 @@ class MediaStreamHandler:
                 call_state=call_state,
             )
 
+            # ── Language fast-update from STT provider detection ──────────
+            # If Sarvam detected a language during transcription, update
+            # call_state.language immediately so TTS responds in the right language.
+            if stt_result.detected_language and stt_result.detected_language != call_state.language:
+                old_lang = call_state.language
+                call_state.language = stt_result.detected_language
+                call_repository.update_call_state(call_state)
+                call_repository.append_call_event(
+                    call_sid=self.call_sid,
+                    event_type="language_detected",
+                    payload={
+                        "detected": stt_result.detected_language,
+                        "previous": old_lang,
+                        "source": stt_result.provider,
+                    },
+                    call_state=call_state,
+                )
+                json_log(
+                    "language_switched",
+                    call_sid=self.call_sid,
+                    from_lang=old_lang,
+                    to_lang=stt_result.detected_language,
+                )
+
             decision_started_at = time.perf_counter()
             result = await sahayak_agent.handle_text_turn(
                 call_sid=self.call_sid,

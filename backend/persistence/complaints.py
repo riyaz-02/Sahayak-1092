@@ -18,6 +18,8 @@ COMPLAINT_TIMELINE_EVENT_TYPES = {
     "government_payload_created",
     "status_updated",
     "note_added",
+    "officer_action",
+    "complaint_resolved",
 }
 
 
@@ -154,6 +156,7 @@ class ComplaintRegistry:
             "reference_id": reference_id,
             "call_log_id": None,
             "call_sid": call_state.call_sid,
+            "caller_number": call_state.caller_number or "",
             "category": category or analysis.category or "general",
             "description": description,
             "location": location,
@@ -288,6 +291,7 @@ class ComplaintRegistry:
                 call_log_id=call_log.get("id"),
                 reference_id=record["reference_id"],
                 call_sid=record["call_sid"],
+                caller_number=record.get("caller_number") or call_log.get("caller_number") or "",
                 category=record["category"],
                 description=record["description"],
                 location=record["location"],

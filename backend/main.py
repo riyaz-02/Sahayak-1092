@@ -837,7 +837,38 @@ async def api_accept_handover(call_sid: str, request: Request):
 async def api_complaints(call_sid: str | None = None):
     """Get recent structured complaints/actions through the registry facade."""
     try:
+        from backend.decision_engine import active_calls
         complaints = complaint_registry.list_complaints(limit=50, call_sid=call_sid)
+
+        # Enrich each complaint with caller_number if missing
+        call_sids_needed = [
+            c["call_sid"] for c in complaints
+            if not c.get("caller_number") and c.get("call_sid")
+        ]
+        # 1. Try in-memory active_calls first (zero latency)
+        sid_to_number: dict[str, str] = {}
+        for sid in call_sids_needed:
+            state = active_calls.get(sid)
+            if state and state.caller_number:
+                sid_to_number[sid] = state.caller_number
+
+        # 2. Fall back to Supabase call_logs for any still missing
+        still_missing = [s for s in call_sids_needed if s not in sid_to_number]
+        if still_missing:
+            try:
+                import backend.supabase_client as _db
+                for sid in still_missing:
+                    log = _db.get_call_log(sid)
+                    if log and log.get("caller_number"):
+                        sid_to_number[sid] = log["caller_number"]
+            except Exception:
+                pass
+
+        # Patch caller_number into results
+        for c in complaints:
+            if not c.get("caller_number") and c.get("call_sid") in sid_to_number:
+                c["caller_number"] = sid_to_number[c["call_sid"]]
+
         return JSONResponse({"complaints": complaints, "count": len(complaints)})
     except Exception:
         return JSONResponse({"complaints": [], "count": 0, "error": "complaints_unavailable"})
@@ -856,6 +887,83 @@ async def api_complaint_timeline(reference_id: str):
             "count": len(timeline),
         }
     )
+
+
+@app.patch("/api/complaints/{reference_id}")
+async def api_update_complaint(reference_id: str, request: Request):
+    """Officer updates complaint status or adds an action note."""
+    body = await request.json()
+    new_status = str(body.get("status") or "").strip()
+    action_note = str(body.get("action_note") or "").strip()
+    officer = str(body.get("officer") or "dashboard").strip()
+
+    allowed_statuses = {"registered", "in_progress", "action_taken", "resolved", "closed"}
+    if new_status and new_status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status. Allowed: {', '.join(sorted(allowed_statuses))}"
+        )
+
+    complaint = complaint_registry.get_by_reference(reference_id)
+    if not complaint:
+        raise HTTPException(status_code=404, detail="Complaint not found")
+
+    updated_fields: dict[str, Any] = {}
+    if new_status and new_status != complaint.get("status"):
+        complaint["status"] = new_status
+        updated_fields["status"] = new_status
+
+    if action_note:
+        updated_fields["action_note"] = action_note
+
+    with complaint_registry._lock:
+        if reference_id in complaint_registry._records:
+            complaint_registry._records[reference_id].update(updated_fields)
+
+    if settings.supabase_configured and updated_fields:
+        try:
+            import datetime as _dt
+            db_update: dict[str, Any] = {**updated_fields, "updated_at": _dt.datetime.now(_dt.UTC).isoformat()}
+            db._supabase_client().table("complaints").update(db_update).eq("reference_id", reference_id).execute()
+        except Exception:
+            pass
+
+    if updated_fields:
+        event_payload: dict[str, Any] = {"officer": officer, **updated_fields}
+        event_type = "status_updated" if new_status else "note_added"
+        complaint_registry.append_timeline_event(
+            reference_id=reference_id,
+            event_type=event_type,
+            payload=event_payload,
+        )
+
+    return JSONResponse({
+        "status": "ok",
+        "reference_id": reference_id,
+        "complaint": {**complaint, **updated_fields},
+    })
+
+
+@app.post("/api/complaints/{reference_id}/notes")
+async def api_add_complaint_note(reference_id: str, request: Request):
+    """Officer adds a note/action record to a complaint timeline."""
+    body = await request.json()
+    note = str(body.get("note") or "").strip()
+    officer = str(body.get("officer") or "dashboard").strip()
+    if not note:
+        raise HTTPException(status_code=400, detail="'note' is required")
+
+    complaint = complaint_registry.get_by_reference(reference_id)
+    if not complaint:
+        raise HTTPException(status_code=404, detail="Complaint not found")
+
+    event = complaint_registry.append_timeline_event(
+        reference_id=reference_id,
+        event_type="note_added",
+        payload={"note": note, "officer": officer},
+    )
+    return JSONResponse({"status": "ok", "event": event})
+
 
 
 @app.get("/api/resolved-cases")

@@ -63,8 +63,14 @@ class Settings:
 
     openai_api_key: str = ""
     openai_base_url: str | None = None
-    llm_model: str = "gpt-4o"
-    llm_provider_timeout_sec: float = 8.0
+    llm_model: str = "gemini-2.5-flash"
+    llm_model_fallbacks: tuple[str, ...] = (
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-flash-latest",
+        "gemini-flash-lite-latest",
+    )
+    llm_provider_timeout_sec: float = 10.0
     analysis_provider: str = "auto"
     embedding_provider: str = "deterministic"
     embedding_model: str = "text-embedding-3-small"
@@ -165,8 +171,12 @@ def get_settings() -> Settings:
         transfer_mode=os.getenv("TRANSFER_MODE", "mock"),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_base_url=os.getenv("OPENAI_BASE_URL") or None,
-        llm_model=os.getenv("LLM_MODEL", "gpt-4o"),
-        llm_provider_timeout_sec=_as_float(os.getenv("LLM_PROVIDER_TIMEOUT_SEC"), 8.0),
+        llm_model=os.getenv("LLM_MODEL", "gemini-2.5-flash"),
+        llm_model_fallbacks=_as_csv(
+            os.getenv("LLM_MODEL_FALLBACKS"),
+            ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-flash-lite-latest"),
+        ),
+        llm_provider_timeout_sec=_as_float(os.getenv("LLM_PROVIDER_TIMEOUT_SEC"), 10.0),
         analysis_provider=os.getenv("ANALYSIS_PROVIDER", "auto"),
         embedding_provider=os.getenv("EMBEDDING_PROVIDER", "deterministic"),
         embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
@@ -183,9 +193,9 @@ def get_settings() -> Settings:
         sarvam_stt_model=os.getenv("SARVAM_STT_MODEL", "saaras:v3"),
         sarvam_stt_mode=os.getenv("SARVAM_STT_MODE", "transcribe"),
         sarvam_tts_model=os.getenv("SARVAM_TTS_MODEL", "bulbul:v3"),
-        sarvam_tts_speaker=os.getenv("SARVAM_TTS_SPEAKER", "shubh"),
-        sarvam_tts_pace=_as_float(os.getenv("SARVAM_TTS_PACE"), 0.95),
-        sarvam_tts_temperature=_as_float(os.getenv("SARVAM_TTS_TEMPERATURE"), 0.35),
+        sarvam_tts_speaker=os.getenv("SARVAM_TTS_SPEAKER", "pavithra"),
+        sarvam_tts_pace=_as_float(os.getenv("SARVAM_TTS_PACE"), 1.0),
+        sarvam_tts_temperature=_as_float(os.getenv("SARVAM_TTS_TEMPERATURE"), 0.25),
         bhashini_api_key=os.getenv("BHASHINI_API_KEY", ""),
         bhashini_user_id=os.getenv("BHASHINI_USER_ID", ""),
         bhashini_pipeline_url=os.getenv(

@@ -186,21 +186,28 @@ async def find_similar_case(
 
 RESPONSE_SYSTEM_PROMPT = """You are Sahayak, the AI voice assistant for India's 1092 emergency helpline.
 
-RULES:
-- Speak in the caller's detected language ({language}).
-- Be calm, empathetic, and professional.
-- Keep responses SHORT (2-4 sentences max) — this is a voice call.
-- If you have a resolution, provide it clearly and ask for confirmation.
-- For the Vachan (confirmation) loop: restate your understanding and ask "Is this correct? Please say yes or no."
-- Never be rude. Always acknowledge the caller's distress.
-- Use simple, everyday language. Avoid jargon.
+YOU ARE ON A LIVE CALL. Every word must be calm, clear, and action-oriented.
 
-CONTEXT:
-Phase: {phase}
-Issue summary: {summary}
-Category: {category}
-Sentiment: {sentiment}
-Urgency: {urgency}"""
+CORE RULES:
+- Speak ONLY in the caller's language: {language}
+- Keep responses to 2-3 sentences MAXIMUM. This is a voice call - brevity saves lives.
+- NEVER ask more than ONE question at a time.
+- For emergencies (accident/medical/fire/trapped): immediately confirm help is dispatched, then ask the ONE most urgent missing detail.
+- NEVER say "Maybe I misunderstood" or "Please tell me what was wrong" for emergencies.
+- Be warm but decisive. Match the caller's urgency level.
+- If ambulance/police/fire is needed: say "I am dispatching [service] to you right now."
+
+SITUATION:
+Phase: {phase} | Category: {category} | Urgency: {urgency} | Sentiment: {sentiment}
+Issue: {summary}
+
+RESPONSE RULES BY PHASE:
+- greeting/collecting_issue: Ask what help they need, ONE empathetic sentence.
+- vachan_pending: Confirm your understanding, ask yes/no.
+- resolved: Give reference number, say help is coming.
+- handover/handover_pending: Say you are connecting them to an officer.
+- queued: Say help is coming, offer IVR options (1=Police, 2=Ambulance, 3=Fire).
+- For high urgency (>0.85): Lead with action first, question second."""
 
 
 async def generate_response(call_state: CallState, analysis: CallAnalysis,
@@ -209,55 +216,86 @@ async def generate_response(call_state: CallState, analysis: CallAnalysis,
     if not settings.openai_api_key:
         return _deterministic_response(call_state, analysis, resolution)
 
-    phase_instructions = {
-        "greeting": "Greet the caller warmly and ask how you can help. Use their language.",
-        "listening": "Acknowledge what they said, show empathy, and ask clarifying questions if needed.",
-        "confirming": f"Restate your understanding and the proposed resolution. Ask for yes/no confirmation.\nProposed resolution: {resolution or 'pending'}",
-        "collecting_issue": "Acknowledge the caller and collect the issue in one calm, specific question.",
-        "clarifying": "Ask what was wrong or missing in Sahayak's understanding. Ask for only the correction needed.",
-        "vachan_pending": f"Restate your understanding and the proposed action. Ask for yes, no, or a correction.\nProposed action: {resolution or call_state.resolution or 'pending'}",
-        "vachan_partial": (
-            "Ask only for the missing or incorrect field: "
-            f"{', '.join(call_state.pending_clarification_fields or ['description'])}. "
-            "Do not ask for the entire story again."
-        ),
-        "resolved": f"Confirm the action taken, provide a reference/complaint number, and wish them well.\nResolution: {resolution or call_state.resolution}",
-        "handover": "Inform the caller you are connecting them to a human officer. Reassure them.",
-        "handover_pending": "Inform the caller you are connecting them to a human officer. Reassure them.",
-        "queued": "Inform the caller that all officers are busy. They are in a priority queue. Offer: Press 1 for Police, 2 for Ambulance, 3 for Fire services.",
+    lang = analysis.language or call_state.language
+    is_emergency = analysis.urgency >= 0.85 and analysis.category in {
+        "accident", "medical", "fire", "missing_person", "domestic"
     }
 
-    instruction = phase_instructions.get(call_state.current_phase, "Respond helpfully.")
+    phase_instructions = {
+        "greeting": "Greet the caller warmly in their language and ask what emergency help they need.",
+        "listening": "Acknowledge their situation with empathy. Ask the ONE most important question to help them.",
+        "confirming": f"Restate your understanding and the proposed resolution. Ask for yes/no confirmation.\nProposed resolution: {resolution or 'pending'}",
+        "collecting_issue": (
+            "For emergencies: immediately confirm you are taking action. Ask for their location if not known. "
+            "For non-emergencies: acknowledge and collect the issue in one calm, specific question."
+        ),
+        "clarifying": (
+            "For emergencies: do NOT say 'maybe I misunderstood'. Instead, acknowledge you heard them "
+            "and ask for the ONE missing detail needed to dispatch help (usually location)."
+            "For non-emergencies: ask what was wrong or missing. Ask for only the correction."
+        ),
+        "vachan_pending": f"Restate your understanding clearly and the action being taken. Ask: Is this correct?\nAction: {resolution or call_state.resolution or 'dispatching help'}",
+        "vachan_partial": (
+            f"Ask only for the missing detail: {', '.join(call_state.pending_clarification_fields or ['location'])}. "
+            "Keep it to ONE short sentence."
+        ),
+        "resolved": f"Confirm help is on the way or the complaint is registered. Give the reference number.\nResolution: {resolution or call_state.resolution}",
+        "handover": "Say you are connecting them to a human officer now. Reassure them their details are passed on.",
+        "handover_pending": "Say you are connecting them to a human officer now. Reassure them their details are passed on.",
+        "queued": "Say all officers are busy but their call is prioritized. Offer: say 'police' for Police, 'ambulance' for Ambulance, 'fire' for Fire.",
+    }
+
+    instruction = phase_instructions.get(call_state.current_phase, "Respond helpfully and ask ONE clear question.")
+
+    # For emergency: add an explicit directive at the top
+    if is_emergency:
+        instruction = (
+            f"EMERGENCY — {analysis.category.upper()}. Urgency {analysis.urgency:.0%}.\n"
+            f"Summary: {analysis.summary or analysis.raw_text}\n"
+            f"{instruction}\n"
+            "Lead with action/reassurance. If location is missing, ask for it NOW. "
+            "Keep your response to 2 sentences max."
+        )
 
     messages = [
         {"role": "system", "content": RESPONSE_SYSTEM_PROMPT.format(
-            language=analysis.language or call_state.language,
+            language=lang,
             phase=call_state.current_phase,
             summary=analysis.summary or call_state.ai_summary,
             category=analysis.category,
             sentiment=analysis.sentiment,
-            urgency=analysis.urgency,
+            urgency=f"{analysis.urgency:.2f}",
         )},
     ]
 
-    # Add conversation history
-    for t in call_state.transcript[-8:]:
+    # Add conversation history (fewer turns for speed in emergencies)
+    history_turns = 4 if is_emergency else 8
+    for t in call_state.transcript[-history_turns:]:
         role = "user" if t["role"] == "caller" else "assistant"
         messages.append({"role": role, "content": t["text"]})
 
     messages.append({"role": "user", "content": f"[INSTRUCTION: {instruction}]\nCaller said: \"{analysis.raw_text}\""})
 
-    try:
-        resp = await client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0.6,
-            max_tokens=200,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"❌ Response generation error: {e}")
-        return _deterministic_response(call_state, analysis, resolution)
+    # Try primary model then fallbacks
+    models_to_try = list(dict.fromkeys([MODEL] + list(settings.llm_model_fallbacks)))
+    for model in models_to_try:
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.4,
+                max_tokens=150,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            err_str = str(e)
+            if "404" in err_str or "NOT_FOUND" in err_str or "no longer available" in err_str.lower():
+                continue  # try next model
+            print(f"❌ Response generation error ({model}): {e}")
+            break
+
+    return _deterministic_response(call_state, analysis, resolution)
+
 
 
 # ──────────────────────────────────────────────
@@ -788,15 +826,24 @@ async def process_caller_input(call_sid: str, text: str, caller_number: str = ""
 # ──────────────────────────────────────────────
 
 GREETING_TEMPLATES = {
-    "kannada": "ನಮಸ್ಕಾರ, ಸಹಾಯಕ್ 1092 ಗೆ ಸ್ವಾಗತ. ನಾನು ನಿಮ್ಮ AI ಸಹಾಯಕ. ನಿಮ್ಮ ಸಮಸ್ಯೆಯನ್ನು ಹೇಳಿ, ನಾನು ತಕ್ಷಣ ಸಹಾಯ ಮಾಡುತ್ತೇನೆ.",
-    "hindi": "नमस्ते, सहायक 1092 में आपका स्वागत है. मैं आपका AI सहायक हूँ. अपनी समस्या बताइए, मैं तुरंत मदद करूँगा.",
-    "english": "Hello, welcome to Sahayak 1092. I am your AI assistant. Please describe your issue and I will help you immediately.",
+    "hindi": "नमस्ते, सहायक 1092 से बात कर रहे हैं। मैं आपकी AI सहायक हूँ। आप अपनी समस्या बताइए, मैं तुरंत मदद करूँगी।",
+    "kannada": "ನಮಸ್ಕಾರ, ಸಹಾಯಕ್ 1092 ಇಲ್ಲಿಂದ ಮಾತನಾಡುತ್ತಿದ್ದೇನೆ. ನಾನು ನಿಮ್ಮ AI ಸಹಾಯಕ. ನಿಮ್ಮ ಸಮಸ್ಯೆಯನ್ನು ಹೇಳಿ, ನಾನು ತಕ್ಷಣ ಸಹಾಯ ಮಾಡುತ್ತೇನೆ.",
+    "english": "Hello, you have reached Sahayak 1092. I am your AI assistant. Please describe your situation and I will help you right away.",
+    "telugu": "నమస్కారం, సహాయక్ 1092 నుండి మాట్లాడుతున్నాను. నేను మీ AI సహాయకురాలిని. మీ సమస్య చెప్పండి, నేను వెంటనే సహాయం చేస్తాను.",
+    "tamil": "வணக்கம், சஹாயக் 1092 இல் இருந்து பேசுகிறேன். நான் உங்கள் AI உதவியாளர். உங்கள் பிரச்சினையை சொல்லுங்கள், உடனே உதவுகிறேன்.",
+    "bengali": "নমস্কার, সহায়ক 1092 থেকে বলছি। আমি আপনার AI সহকারী। আপনার সমস্যা বলুন, আমি এখনই সাহায্য করব।",
+    "marathi": "नमस्कार, सहायक 1092 मधून बोलत आहे. मी तुमची AI सहाय्यक आहे. तुमची समस्या सांगा, मी लगेच मदत करेन.",
+    "gujarati": "નમસ્તે, સહાયક 1092 માંથી વાત કરી રહ્યાં છો. હું તમારી AI સહાયક છું. તમારી સમસ્યા જણાવો, હું તરત જ મદદ કરીશ.",
+    "punjabi": "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਸਹਾਇਕ 1092 ਤੋਂ ਬੋਲ ਰਹੀ ਹਾਂ। ਮੈਂ ਤੁਹਾਡੀ AI ਸਹਾਇਕ ਹਾਂ। ਆਪਣੀ ਸਮੱਸਿਆ ਦੱਸੋ, ਮੈਂ ਤੁਰੰਤ ਮਦਦ ਕਰਾਂਗੀ।",
+    "malayalam": "നമസ്കാരം, സഹായക് 1092 ൽ നിന്ന് സംസാരിക്കുകയാണ്. ഞാൻ നിങ്ങളുടെ AI സഹായകയാണ്. നിങ്ങളുടെ പ്രശ്നം പറയൂ, ഞാൻ ഉടൻ സഹായിക്കാം.",
+    "urdu": "آداب، سہایک 1092 سے بات ہو رہی ہے۔ میں آپ کی AI معاون ہوں۔ اپنا مسئلہ بتائیں، میں فوری مدد کروں گی۔",
+    "odia": "ନମସ୍କାର, ସହାୟକ 1092 ରୁ କଥା ହେଉଛୁ। ମୁଁ ଆପଣଙ୍କ AI ସହାୟକ। ଆପଣଙ୍କ ସମସ୍ୟା କୁହନ୍ତୁ, ମୁଁ ତୁରନ୍ତ ସାହାଯ୍ୟ କରିବି।",
 }
 
 
-def get_greeting(language: str = "english") -> str:
-    """Get the initial greeting in the caller's language."""
-    return GREETING_TEMPLATES.get(language.lower(), GREETING_TEMPLATES["english"])
+def get_greeting(language: str = "hindi") -> str:
+    """Get the initial greeting in the caller's language. Defaults to Hindi."""
+    return GREETING_TEMPLATES.get(language.lower(), GREETING_TEMPLATES["hindi"])
 
 
 # ──────────────────────────────────────────────
@@ -840,29 +887,54 @@ def _apply_vachan_correction(summary: str, correction: dict) -> str:
 async def _generate_resolution(analysis: CallAnalysis, call_state: CallState) -> str:
     """Generate a resolution for the caller's issue."""
     if not settings.openai_api_key:
-        return _fallback_resolution(call_state)
+        return _fallback_resolution(call_state, analysis)
 
     messages = [
         {"role": "system", "content": RESOLUTION_SYSTEM_PROMPT.format(language=analysis.language)},
         {"role": "user", "content": f"Category: {analysis.category}\nIssue: {analysis.summary}\nUrgency: {analysis.urgency}\nSentiment: {analysis.sentiment}"},
     ]
-    try:
-        resp = await client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0.4,
-            max_tokens=250,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception:
-        return _fallback_resolution(call_state)
+    models_to_try = list(dict.fromkeys([MODEL] + list(settings.llm_model_fallbacks)))
+    for model in models_to_try:
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.4,
+                max_tokens=250,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as exc:
+            err_str = str(exc)
+            if "404" in err_str or "NOT_FOUND" in err_str or "no longer available" in err_str.lower():
+                continue
+            break
+    return _fallback_resolution(call_state, analysis)
 
 
-def _fallback_resolution(call_state: CallState) -> str:
+def _fallback_resolution(call_state: CallState, analysis: CallAnalysis | None = None) -> str:
+    ref = call_state.complaint_reference_id or f"SAH-{call_state.call_sid[-6:].upper()}"
+    category = (analysis.category if analysis else None) or "general"
+    lang = (analysis.language if analysis else None) or call_state.language or "hindi"
+
+    if category == "accident":
+        if lang == "hindi":
+            return f"एम्बुलेंस और पुलिस को सूचित किया जा रहा है। संदर्भ: {ref}। कृपया फोन पास रखें।"
+        if lang == "kannada":
+            return f"ಆಂಬ್ಯುಲೆನ್ಸ್ ಮತ್ತು ಪೊಲೀಸ್ ಮಾಹಿತಿ ನೀಡಲಾಗಿದೆ. ಉಲ್ಲೇಖ: {ref}."
+        return f"Ambulance and police are being notified. Reference: {ref}. Please stay on the line."
+    if category == "medical":
+        if lang == "hindi":
+            return f"एम्बुलेंस भेजी जा रही है। संदर्भ: {ref}।"
+        return f"Ambulance is being dispatched. Reference: {ref}."
+    if category == "fire":
+        if lang == "hindi":
+            return f"फायर ब्रिगेड भेजी जा रही है। संदर्भ: {ref}।"
+        return f"Fire brigade is being dispatched. Reference: {ref}."
+
     return (
-        "Your complaint has been registered for action. "
-        f"Reference: SAH-{call_state.call_sid[-6:].upper()}. "
-        "Please keep your phone reachable; an officer will follow up if more details are needed."
+        f"Your complaint has been registered. "
+        f"Reference: {ref}. "
+        "Please keep your phone reachable; an officer will follow up shortly."
     )
 
 
@@ -873,51 +945,86 @@ def _deterministic_response(
 ) -> str:
     """Fast local/demo response when no live LLM key is configured."""
 
-    language = (analysis.language or call_state.language or "english").lower()
+    language = (analysis.language or call_state.language or "hindi").lower()
     phase = call_state.current_phase
     action_text = resolution or call_state.resolution or call_state.adapted_resolution
+    ref = call_state.complaint_reference_id or f"SAH-{call_state.call_sid[-6:].upper()}"
+
+    # ── Emergency fast-path ─────────────────────────────────────────
+    is_emergency = analysis.urgency >= 0.85 and analysis.category in {
+        "accident", "medical", "fire", "missing_person", "domestic"
+    }
+    if is_emergency and phase not in {"resolved", "handover", "handover_pending", "queued"}:
+        emergency_responses = {
+            "hindi": {
+                "accident": "मैंने आपकी बात सुन ली - दुर्घटना हुई है। मैं अभी एम्बुलेंस और पुलिस भेज रही हूँ। कृपया अपना सटीक स्थान बताइए?",
+                "medical": "मैंने सुना - मेडिकल इमरजेंसी है। मैं अभी एम्बुलेंस भेज रही हूँ। आप कहाँ हैं, पता बताइए?",
+                "fire": "मैंने सुना - आग लगी है। मैं अभी फायर ब्रिगेड भेज रही हूँ। आपका पता क्या है?",
+                "missing_person": "मैंने सुना - कोई गुम हो गया है। मैं अभी पुलिस को सूचित कर रही हूँ। कृपया नाम और आखिरी जगह बताइए?",
+                "domestic": "आप सुरक्षित रहें। मैं अभी पुलिस भेज रही हूँ। आप किस पते पर हैं?",
+            },
+            "kannada": {
+                "accident": "ನಿಮ್ಮ ಮಾತು ಕೇಳಿದೆ - ಅಪಘಾತವಾಗಿದೆ. ನಾನು ಈಗ ಆಂಬ್ಯುಲೆನ್ಸ್ ಮತ್ತು ಪೊಲೀಸ್ ಕಳುಹಿಸುತ್ತಿದ್ದೇನೆ. ನಿಮ್ಮ ನಿಖರ ಸ್ಥಳ ಹೇಳಿ?",
+                "medical": "ಕೇಳಿದೆ - ವೈದ್ಯಕೀಯ ತುರ್ತು ಇದೆ. ಆಂಬ್ಯುಲೆನ್ಸ್ ಕಳುಹಿಸುತ್ತಿದ್ದೇನೆ. ನೀವು ಎಲ್ಲಿ ಇದ್ದೀರಿ?",
+                "fire": "ಕೇಳಿದೆ - ಬೆಂಕಿ ಹತ್ತಿದೆ. ಫೈರ್ ಬ್ರಿಗೇಡ್ ಕಳುಹಿಸುತ್ತಿದ್ದೇನೆ. ನಿಮ್ಮ ವಿಳಾಸ ಏನು?",
+                "missing_person": "ಕೇಳಿದೆ - ಯಾರೋ ಕಾಣೆಯಾಗಿದ್ದಾರೆ. ಪೊಲೀಸ್‌ಗೆ ತಿಳಿಸುತ್ತಿದ್ದೇನೆ. ಹೆಸರು ಮತ್ತು ಕೊನೆಯ ಸ್ಥಳ ಹೇಳಿ?",
+                "domestic": "ಸುರಕ್ಷಿತರಾಗಿರಿ. ಪೊಲೀಸ್ ಕಳುಹಿಸುತ್ತಿದ್ದೇನೆ. ನಿಮ್ಮ ವಿಳಾಸ ಹೇಳಿ?",
+            },
+            "english": {
+                "accident": "I heard you - there has been an accident. I am dispatching an ambulance and police right now. Please tell me your exact location?",
+                "medical": "I heard you - this is a medical emergency. I am dispatching an ambulance right now. Where are you?",
+                "fire": "I heard you - there is a fire. I am sending the fire brigade right now. What is your address?",
+                "missing_person": "I heard you - someone is missing. I am alerting police right now. Please tell me their name and last known location?",
+                "domestic": "Please stay safe. I am sending police to you right now. What is your address?",
+            },
+        }
+        lang_responses = emergency_responses.get(language, emergency_responses["hindi"])
+        cat_response = lang_responses.get(analysis.category)
+        if cat_response:
+            return cat_response
+    # ────────────────────────────────────────────────────────────────
 
     english = {
         "queued": (
             "All officers are busy, but I have placed you in a priority queue. "
-            "Press 1 for Police, 2 for Ambulance, or 3 for Fire Services."
+            "Say 'police', 'ambulance', or 'fire' for direct dispatch."
         ),
-        "handover": "I understand. I am connecting you to a human officer with your details now.",
-        "handover_pending": "I understand. I am connecting you to a human officer with your details now.",
+        "handover": "I am connecting you to a human officer right now. Your details have been passed on.",
+        "handover_pending": "I am connecting you to a human officer right now. Your details have been passed on.",
         "resolved": (
-            f"Done. {action_text or 'Your action has been registered.'} "
-            f"Reference: {call_state.complaint_reference_id or 'SAH-' + call_state.call_sid[-6:].upper()}."
+            f"Done. {action_text or 'Your complaint has been registered.'} "
+            f"Reference: {ref}. Help is on the way."
         ),
-        "clarifying": "I may have misunderstood. Please tell me only what was wrong or missing.",
-        "vachan_partial": "Thank you. Please tell me the missing or corrected detail so I can confirm again.",
+        "clarifying": "I heard you. Could you please tell me your exact location so I can dispatch help?",
+        "vachan_partial": "Thank you. Please tell me the missing detail and I will confirm again.",
         "vachan_pending": call_state.vachan_prompt
-        or f"I understood this: {call_state.ai_summary or analysis.summary}. Is this correct?",
+        or f"I understood: {call_state.ai_summary or analysis.summary}. Is this correct?",
         "default": (
             f"I understood: {call_state.ai_summary or analysis.summary or 'your concern'}. "
-            f"{action_text or 'I am preparing the next step.'} Is this correct?"
+            f"{action_text or 'I am taking action.'} Is this correct?"
         ),
     }
     hindi = {
-        "queued": "सभी अधिकारी व्यस्त हैं, लेकिन मैंने आपको प्राथमिकता कतार में रखा है. पुलिस के लिए 1, एम्बुलेंस के लिए 2, फायर के लिए 3 दबाएं.",
-        "handover": "मैं आपको आपकी जानकारी के साथ मानव अधिकारी से जोड़ रहा हूँ.",
-        "handover_pending": "मैं आपको आपकी जानकारी के साथ मानव अधिकारी से जोड़ रहा हूँ.",
-        "resolved": f"हो गया. संदर्भ संख्या: {call_state.complaint_reference_id or 'SAH-' + call_state.call_sid[-6:].upper()}.",
-        "clarifying": "शायद मैंने गलत समझा. कृपया केवल सही जानकारी बताइए.",
-        "vachan_partial": "धन्यवाद. कृपया अधूरी या सही जानकारी बताइए ताकि मैं फिर पुष्टि कर सकूँ.",
+        "queued": "सभी अधिकारी व्यस्त हैं, लेकिन आपकी कॉल प्राथमिकता में है। 'पुलिस', 'एम्बुलेंस', या 'फायर' कहें।",
+        "handover": "मैं आपको अभी मानव अधिकारी से जोड़ रही हूँ। आपकी जानकारी पहुँचा दी गई है।",
+        "handover_pending": "मैं आपको अभी मानव अधिकारी से जोड़ रही हूँ। आपकी जानकारी पहुँचा दी गई है।",
+        "resolved": f"हो गया। संदर्भ संख्या: {ref}। मदद रास्ते में है।",
+        "clarifying": "मैंने सुना। कृपया अपना सटीक पता बताइए ताकि मैं मदद भेज सकूँ?",
+        "vachan_partial": "धन्यवाद। अधूरी जानकारी बताइए ताकि मैं फिर पुष्टि कर सकूँ।",
         "vachan_pending": call_state.vachan_prompt
-        or f"मैंने यह समझा: {call_state.ai_summary or analysis.summary}. क्या यह सही है?",
-        "default": f"मैंने समझा: {call_state.ai_summary or analysis.summary or 'आपकी समस्या'}. क्या यह सही है?",
+        or f"मैंने यह समझा: {call_state.ai_summary or analysis.summary}। क्या यह सही है?",
+        "default": f"मैंने समझा: {call_state.ai_summary or analysis.summary or 'आपकी समस्या'}। क्या यह सही है?",
     }
     kannada = {
-        "queued": "ಎಲ್ಲಾ ಅಧಿಕಾರಿಗಳು ಬ್ಯುಸಿಯಾಗಿದ್ದಾರೆ, ಆದರೆ ನಿಮ್ಮ ಕರೆಯನ್ನು ಆದ್ಯತಾ ಸಾಲಿನಲ್ಲಿ ಇಟ್ಟಿದ್ದೇನೆ. ಪೊಲೀಸ್‌ಗೆ 1, ಆಂಬ್ಯುಲೆನ್ಸ್‌ಗೆ 2, ಫೈರ್‌ಗೆ 3 ಒತ್ತಿರಿ.",
-        "handover": "ನಿಮ್ಮ ವಿವರಗಳೊಂದಿಗೆ ಮಾನವ ಅಧಿಕಾರಿಗೆ ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇನೆ.",
-        "handover_pending": "ನಿಮ್ಮ ವಿವರಗಳೊಂದಿಗೆ ಮಾನವ ಅಧಿಕಾರಿಗೆ ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇನೆ.",
-        "resolved": f"ಮುಗಿದಿದೆ. ಉಲ್ಲೇಖ ಸಂಖ್ಯೆ: {call_state.complaint_reference_id or 'SAH-' + call_state.call_sid[-6:].upper()}.",
-        "clarifying": "ನಾನು ತಪ್ಪಾಗಿ ಅರ್ಥ ಮಾಡಿಕೊಂಡಿರಬಹುದು. ದಯವಿಟ್ಟು ಸರಿಯಾದ ವಿವರವನ್ನು ಮಾತ್ರ ಹೇಳಿ.",
-        "vachan_partial": "ಧನ್ಯವಾದಗಳು. ಮತ್ತೆ ದೃಢೀಕರಿಸಲು ತಪ್ಪಿದ ಅಥವಾ ಸರಿಯಾದ ವಿವರವನ್ನು ಹೇಳಿ.",
+        "queued": "ಎಲ್ಲಾ ಅಧಿಕಾರಿಗಳು ಬ್ಯುಸಿ. ನಿಮ್ಮ ಕರೆ ಆದ್ಯತೆಯಲ್ಲಿದೆ. 'ಪೊಲೀಸ್', 'ಆಂಬ್ಯುಲೆನ್ಸ್', ಅಥವಾ 'ಫೈರ್' ಹೇಳಿ.",
+        "handover": "ನಿಮ್ಮ ವಿವರಗಳೊಂದಿಗೆ ಮಾನವ ಅಧಿಕಾರಿಗೆ ಈಗ ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇನೆ.",
+        "handover_pending": "ನಿಮ್ಮ ವಿವರಗಳೊಂದಿಗೆ ಮಾನವ ಅಧಿಕಾರಿಗೆ ಈಗ ಸಂಪರ್ಕಿಸುತ್ತಿದ್ದೇನೆ.",
+        "resolved": f"ಮುಗಿದಿದೆ. ಉಲ್ಲೇಖ ಸಂಖ್ಯೆ: {ref}. ಸಹಾಯ ಬರುತ್ತಿದೆ.",
+        "clarifying": "ಕೇಳಿದೆ. ದಯವಿಟ್ಟು ನಿಮ್ಮ ನಿಖರ ಸ್ಥಳ ಹೇಳಿ ಆಗ ಸಹಾಯ ಕಳುಹಿಸುತ್ತೇನೆ?",
+        "vachan_partial": "ಧನ್ಯವಾದ. ತಪ್ಪಿದ ವಿವರ ಹೇಳಿ ಆಗ ದೃಢೀಕರಿಸುತ್ತೇನೆ.",
         "vachan_pending": call_state.vachan_prompt
-        or f"ನಾನು ಹೀಗೆ ಅರ್ಥ ಮಾಡಿಕೊಂಡಿದ್ದೇನೆ: {call_state.ai_summary or analysis.summary}. ಇದು ಸರಿಯೇ?",
-        "default": f"ನಾನು ಅರ್ಥ ಮಾಡಿಕೊಂಡಿದ್ದು: {call_state.ai_summary or analysis.summary or 'ನಿಮ್ಮ ಸಮಸ್ಯೆ'}. ಇದು ಸರಿಯೇ?",
+        or f"ನಾನು ಹೀಗೆ ಅರ್ಥ ಮಾಡಿದ್ದೇನೆ: {call_state.ai_summary or analysis.summary}. ಸರಿಯೇ?",
+        "default": f"ನಾನು ಅರ್ಥ ಮಾಡಿಕೊಂಡಿದ್ದು: {call_state.ai_summary or analysis.summary or 'ನಿಮ್ಮ ಸಮಸ್ಯೆ'}. ಸರಿಯೇ?",
     }
     templates = {"hindi": hindi, "kannada": kannada}.get(language, english)
     return templates.get(phase, templates["default"])

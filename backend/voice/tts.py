@@ -43,27 +43,56 @@ LANGUAGE_TO_SARVAM = {
     "odia": "od-IN",
     "punjabi": "pa-IN",
     "gujarati": "gu-IN",
+    "urdu": "ur-IN",
     "kn": "kn-IN",
     "hi": "hi-IN",
     "en": "en-IN",
 }
 
+# Per-language natural speaker mapping for Sarvam Bulbul TTS
+# Female voices: pavithra (hi/en), anushka (kn), maitreyi (te/mr/bn)
+# Override globally via SARVAM_TTS_SPEAKER env var
+SARVAM_SPEAKER_MAP = {
+    "hindi":     "pavithra",   # warm, natural Hindi female
+    "english":   "pavithra",   # English-accented Indian female
+    "kannada":   "anushka",    # Kannada female
+    "telugu":    "maitreyi",   # Telugu female
+    "tamil":     "maitreyi",   # Tamil female
+    "bengali":   "maitreyi",   # Bengali fallback
+    "marathi":   "maitreyi",   # Marathi fallback
+    "gujarati":  "pavithra",
+    "punjabi":   "pavithra",
+    "malayalam": "anushka",
+    "odia":      "maitreyi",
+    "urdu":      "pavithra",
+}
+
 GOOGLE_VOICES = {
-    "kannada": ("kn-IN", "kn-IN-Wavenet-A"),
-    "hindi": ("hi-IN", "hi-IN-Wavenet-A"),
-    "english": ("en-IN", "en-IN-Wavenet-A"),
-    "telugu": ("te-IN", "te-IN-Standard-A"),
-    "tamil": ("ta-IN", "ta-IN-Wavenet-A"),
-    "urdu": ("ur-IN", "ur-IN-Wavenet-A"),
+    "kannada":   ("kn-IN", "kn-IN-Wavenet-A"),
+    "hindi":     ("hi-IN", "hi-IN-Wavenet-D"),   # female, natural
+    "english":   ("en-IN", "en-IN-Wavenet-D"),
+    "telugu":    ("te-IN", "te-IN-Standard-A"),
+    "tamil":     ("ta-IN", "ta-IN-Wavenet-C"),
+    "urdu":      ("ur-IN", "ur-IN-Wavenet-A"),
+    "bengali":   ("bn-IN", "bn-IN-Wavenet-A"),
+    "malayalam": ("ml-IN", "ml-IN-Wavenet-A"),
+    "marathi":   ("mr-IN", "mr-IN-Wavenet-A"),
+    "gujarati":  ("gu-IN", "gu-IN-Wavenet-A"),
+    "punjabi":   ("pa-IN", "pa-IN-Standard-A"),
 }
 
 EDGE_VOICES = {
-    "kannada": "kn-IN-GaganNeural",
-    "hindi": "hi-IN-SwaraNeural",
-    "english": "en-IN-NeerjaNeural",
-    "telugu": "te-IN-ShrutiNeural",
-    "tamil": "ta-IN-PallaviNeural",
-    "urdu": "ur-PK-AsadNeural",
+    "kannada":   "kn-IN-GaganNeural",
+    "hindi":     "hi-IN-SwaraNeural",    # warm, clear female Hindi
+    "english":   "en-IN-NeerjaNeural",
+    "telugu":    "te-IN-ShrutiNeural",
+    "tamil":     "ta-IN-PallaviNeural",
+    "urdu":      "ur-PK-UzmaNeural",     # female Urdu
+    "bengali":   "bn-IN-TanishaaNeural",
+    "malayalam": "ml-IN-SobhanaNeural",
+    "marathi":   "mr-IN-AarohiNeural",
+    "gujarati":  "gu-IN-DhwaniNeural",
+    "punjabi":   "pa-IN-VaaniNeural",
 }
 
 COMMON_TTS_PHRASES = {
@@ -245,12 +274,15 @@ class SarvamTTSProvider:
         return is_valid_key(self.settings.sarvam_api_key) and bool(self.settings.sarvam_base_url)
 
     async def synthesize(self, text: str, language: str) -> bytes | None:
-        language_code = LANGUAGE_TO_SARVAM.get(_language_key(language), "en-IN")
+        lang_key = _language_key(language)
+        language_code = LANGUAGE_TO_SARVAM.get(lang_key, "en-IN")
+        # Pick natural female speaker per language; fall back to env config
+        speaker = SARVAM_SPEAKER_MAP.get(lang_key, self.settings.sarvam_tts_speaker)
         payload = {
             "text": text[:2500],
             "target_language_code": language_code,
             "model": self.settings.sarvam_tts_model,
-            "speaker": self.settings.sarvam_tts_speaker,
+            "speaker": speaker,
             "speech_sample_rate": 8000,
             "output_audio_codec": "wav",
         }

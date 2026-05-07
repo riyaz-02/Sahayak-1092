@@ -21,6 +21,12 @@ SUPPORTED_LANGUAGES = {
     "telugu",
     "tamil",
     "urdu",
+    "bengali",
+    "marathi",
+    "gujarati",
+    "punjabi",
+    "malayalam",
+    "odia",
     "unknown",
 }
 
@@ -118,6 +124,23 @@ class CallAnalysis(BaseModel):
             "hin": "hindi",
             "kn": "kannada",
             "kan": "kannada",
+            "te": "telugu",
+            "tel": "telugu",
+            "ta": "tamil",
+            "tam": "tamil",
+            "ur": "urdu",
+            "bn": "bengali",
+            "ben": "bengali",
+            "mr": "marathi",
+            "mar": "marathi",
+            "gu": "gujarati",
+            "guj": "gujarati",
+            "pa": "punjabi",
+            "pun": "punjabi",
+            "ml": "malayalam",
+            "mal": "malayalam",
+            "or": "odia",
+            "od": "odia",
         }
         label = _normalize_label(str(value or "english"))
         return aliases.get(label, label if label in SUPPORTED_LANGUAGES else "unknown")
@@ -233,7 +256,7 @@ class CallState:
 
     call_sid: str = ""
     caller_number: str = ""
-    language: str = "english"
+    language: str = "hindi"
     dialect: str = ""
     transcript: list[dict[str, Any]] = field(default_factory=list)
     analyses: list[dict[str, Any]] = field(default_factory=list)

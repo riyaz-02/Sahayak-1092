@@ -27,7 +27,7 @@ LANGUAGE_TO_BHASHINI = {
     "en": "en",
 }
 
-LANGUAGE_TO_SARVAM = {
+LANGUAGE_TO_SARVAM_STT = {
     "kannada": "kn-IN",
     "hindi": "hi-IN",
     "english": "en-IN",
@@ -43,9 +43,27 @@ LANGUAGE_TO_SARVAM = {
     "kn": "kn-IN",
     "hi": "hi-IN",
     "en": "en-IN",
+    # 'unknown' triggers Sarvam auto-detection
     "auto": "unknown",
     "unknown": "unknown",
 }
+
+# Reverse map: Sarvam BCP-47 detected code → internal language name
+SARVAM_LANG_CODE_TO_NAME: dict[str, str] = {v: k for k, v in {
+    "kn-IN": "kannada",
+    "hi-IN": "hindi",
+    "en-IN": "english",
+    "te-IN": "telugu",
+    "ta-IN": "tamil",
+    "ur-IN": "urdu",
+    "bn-IN": "bengali",
+    "ml-IN": "malayalam",
+    "mr-IN": "marathi",
+    "od-IN": "odia",
+    "pa-IN": "punjabi",
+    "gu-IN": "gujarati",
+}.items()}
+
 
 LANGUAGE_TO_DEEPGRAM = {
     "kannada": "kn",
@@ -131,6 +149,7 @@ class STTResult:
     provider: str | None
     latency_ms: float
     attempts: list[STTAttempt]
+    detected_language: str | None = None  # language detected by the provider (if any)
 
     @property
     def success(self) -> bool:
@@ -143,6 +162,7 @@ class STTResult:
             "latency_ms": self.latency_ms,
             "attempts": [attempt.as_dict() for attempt in self.attempts],
             "success": self.success,
+            "detected_language": self.detected_language,
         }
 
 
@@ -173,7 +193,9 @@ class SarvamSTTProvider:
         # mu-law decoding, so resample before upload.
         pcm_16k = _resample_pcm16(audio_bytes, source_rate=8000, target_rate=16000)
         wav_data = create_wav_header(pcm_16k, sample_rate=16000) + pcm_16k
-        language_code = LANGUAGE_TO_SARVAM.get(_language_key(language), "unknown")
+        # Use LANGUAGE_TO_SARVAM_STT; 'unknown' triggers Sarvam multilingual auto-detection
+        language_code = LANGUAGE_TO_SARVAM_STT.get(_language_key(language), "unknown")
+
         headers = {"api-subscription-key": self.settings.sarvam_api_key}
         data = {
             "model": self.settings.sarvam_stt_model,
@@ -195,6 +217,38 @@ class SarvamSTTProvider:
 
         transcript = str(payload.get("transcript") or "").strip()
         return transcript or None
+
+    async def transcribe_with_language(self, audio_bytes: bytes, language: str) -> tuple[str | None, str | None]:
+        """Transcribe and also return the detected language code from Sarvam."""
+        pcm_16k = _resample_pcm16(audio_bytes, source_rate=8000, target_rate=16000)
+        wav_data = create_wav_header(pcm_16k, sample_rate=16000) + pcm_16k
+        lang_key = _language_key(language)
+        language_code = LANGUAGE_TO_SARVAM_STT.get(lang_key, "unknown")
+
+        headers = {"api-subscription-key": self.settings.sarvam_api_key}
+        data = {
+            "model": self.settings.sarvam_stt_model,
+            "language_code": language_code,
+        }
+        if self.settings.sarvam_stt_model == "saaras:v3" and self.settings.sarvam_stt_mode:
+            data["mode"] = self.settings.sarvam_stt_mode
+        files = {"file": ("caller.wav", wav_data, "audio/wav")}
+
+        async with httpx.AsyncClient(timeout=self.settings.voice_provider_timeout_sec) as client:
+            response = await client.post(
+                f"{self.settings.sarvam_base_url.rstrip('/')}/speech-to-text",
+                data=data,
+                files=files,
+                headers=headers,
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        transcript = str(payload.get("transcript") or "").strip()
+        # Sarvam returns detected language_code e.g. 'hi-IN' when auto-detecting
+        raw_lang = payload.get("language_code") or ""
+        detected = SARVAM_LANG_CODE_TO_NAME.get(raw_lang, None)
+        return (transcript or None, detected)
 
 
 @dataclass
@@ -435,10 +489,19 @@ async def transcribe_audio_with_fallback(
 
         started_at = time.perf_counter()
         try:
-            text = await asyncio.wait_for(
-                provider.transcribe(audio_bytes, language),
-                timeout=active_settings.voice_provider_timeout_sec,
-            )
+            # For Sarvam, use the enhanced method that also returns detected language
+            if hasattr(provider, "transcribe_with_language"):
+                text, detected_lang = await asyncio.wait_for(
+                    provider.transcribe_with_language(audio_bytes, language),
+                    timeout=active_settings.voice_provider_timeout_sec,
+                )
+            else:
+                text = await asyncio.wait_for(
+                    provider.transcribe(audio_bytes, language),
+                    timeout=active_settings.voice_provider_timeout_sec,
+                )
+                detected_lang = None
+
             latency_ms = _timed_ms(started_at)
             clean_text = str(text or "").strip()
             attempts.append(
@@ -456,7 +519,9 @@ async def transcribe_audio_with_fallback(
                     provider=provider_name,
                     latency_ms=_timed_ms(total_started_at),
                     attempts=attempts,
+                    detected_language=detected_lang,
                 )
+
         except Exception as exc:
             attempts.append(
                 STTAttempt(

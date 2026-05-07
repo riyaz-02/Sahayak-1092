@@ -22,16 +22,20 @@ from backend.intelligence.schemas import (
 
 
 ANALYSIS_SYSTEM_PROMPT = """You are the AI brain of Sahayak 1092, India's emergency helpline.
-Analyse the caller's message and return one JSON object matching the provided schema.
+Analyse the caller's message and return ONE JSON object matching the schema below.
 
-Rules:
-- Detect language, dialect, sentiment, urgency, confidence, category, and summary.
-- `caller_wants_human` is true only when the caller asks for an officer/person/human.
-- During Vachan phases, set `confirmation_status` to yes, no, partial, or none.
-- For partial confirmation, include `correction_text` and `missing_fields`.
-- `is_confirmation` is true for yes, false for no, and null for partial/none.
-- Prefer safe handover signals over autonomous confidence when the caller is distressed.
-- Output only JSON; no markdown or explanation."""
+CRITICAL RULES:
+- This is a LIVE EMERGENCY HELPLINE. Respond with extreme care.
+- Detect language precisely. Hindi Devanagari → 'hindi', Kannada → 'kannada', etc.
+- For accidents/fire/medical/trapped persons: urgency >= 0.90, sentiment = 'distressed'.
+- If caller says they are stuck/trapped/injured/bleeding/fire: urgency = 0.95+, confidence = 0.90+.
+- `caller_wants_human` true ONLY if they explicitly ask for an officer/person/human.
+- During Vachan phases, set confirmation_status to yes/no/partial/none.
+- For emergency categories (accident, medical, fire), always set confidence >= 0.85 even with few words.
+- `summary` must describe the SPECIFIC emergency in one sentence (not generic text).
+- Output ONLY valid JSON. No markdown, no explanation.
+
+EMERGENCY FAST-PATH: If urgency >= 0.85, set confidence >= 0.85 so the system can act immediately."""
 
 
 def extract_json(text: str) -> dict[str, Any]:
@@ -255,10 +259,20 @@ class DeterministicAnalyzer:
             "bleeding",
             "unconscious",
             "heart attack",
+            "hospital",
+            "chest pain",
+            "फंसा",
+            "फंस",
+            "अटक",
+            "lift में",
+            "elevator",
             "एम्बुलेंस",
             "घायल",
             "बेहोश",
             "रक्त",
+            "ஆம்புலன்ஸ்",
+            "ஆம்புலென்ஸ்",
+            "ஆங்கிலம்",
             "ಆಂಬ್ಯುಲೆನ್ಸ್",
             "ಗಾಯ",
             "ರಕ್ತ",
@@ -298,6 +312,9 @@ class DeterministicAnalyzer:
         "unconscious",
         "fire",
         "ambulance",
+        "trapped",
+        "stuck",
+        "trapped inside",
         "मदद",
         "तुरंत",
         "आपात",
@@ -306,6 +323,12 @@ class DeterministicAnalyzer:
         "खून",
         "बचाओ",
         "सहाय",
+        "फंस",
+        "फंसा",
+        "अटक",
+        "अटका",
+        "lift",
+        "elevator",
         "ತುರ್ತು",
         "ಅಪಾಯ",
         "ರಕ್ತ",
@@ -493,7 +516,9 @@ class DeterministicAnalyzer:
     def _score_urgency(self, text: str, category: str, caller_wants_human: bool) -> float:
         if category in {"fire", "medical"}:
             return 0.96
-        if category in {"accident", "domestic", "missing_person"}:
+        if category in {"accident"}:
+            return 0.92
+        if category in {"domestic", "missing_person"}:
             return 0.82
         if _contains_any(text, self.DISTRESS_KEYWORDS):
             return 0.92
@@ -605,26 +630,32 @@ class LLMAnalyzer:
         ]
 
         last_error: Exception | None = None
-        for response_format in response_formats:
-            kwargs: dict[str, Any] = {
-                "model": self.settings.llm_model,
-                "messages": messages,
-                "temperature": 0.1,
-                "max_tokens": 350,
-            }
-            if response_format is not None:
-                kwargs["response_format"] = response_format
-            try:
-                resp = await self.client.chat.completions.create(**kwargs)
-                payload = extract_json(resp.choices[0].message.content or "{}")
-                payload.setdefault("raw_text", text)
-                analysis = CallAnalysis.model_validate(payload)
-                return analysis
-            except Exception as exc:
-                last_error = exc
-                if "429" in str(exc):
-                    await asyncio.sleep(2)
-                continue
+        models_to_try = list(dict.fromkeys([self.settings.llm_model] + list(self.settings.llm_model_fallbacks)))
+        for model in models_to_try:
+            for response_format in response_formats:
+                kwargs: dict[str, Any] = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.1,
+                    "max_tokens": 400,
+                }
+                if response_format is not None:
+                    kwargs["response_format"] = response_format
+                try:
+                    resp = await self.client.chat.completions.create(**kwargs)
+                    payload = extract_json(resp.choices[0].message.content or "{}")
+                    payload.setdefault("raw_text", text)
+                    analysis = CallAnalysis.model_validate(payload)
+                    return analysis
+                except Exception as exc:
+                    last_error = exc
+                    err_str = str(exc)
+                    if "404" in err_str or "NOT_FOUND" in err_str or "no longer available" in err_str.lower():
+                        # Model unavailable - try next model immediately
+                        break
+                    if "429" in err_str:
+                        await asyncio.sleep(1.5)
+                    continue
         raise RuntimeError(f"LLM analysis failed: {last_error}")
 
 

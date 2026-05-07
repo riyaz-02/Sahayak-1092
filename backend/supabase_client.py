@@ -298,6 +298,7 @@ CREATE TABLE IF NOT EXISTS complaints (
 
 ALTER TABLE IF EXISTS complaints ADD COLUMN IF NOT EXISTS reference_id TEXT UNIQUE;
 ALTER TABLE IF EXISTS complaints ADD COLUMN IF NOT EXISTS call_sid TEXT;
+ALTER TABLE IF EXISTS complaints ADD COLUMN IF NOT EXISTS caller_number TEXT;
 ALTER TABLE IF EXISTS complaints ADD COLUMN IF NOT EXISTS urgency FLOAT;
 ALTER TABLE IF EXISTS complaints ADD COLUMN IF NOT EXISTS language TEXT;
 ALTER TABLE IF EXISTS complaints ADD COLUMN IF NOT EXISTS dialect TEXT;
@@ -863,6 +864,7 @@ def register_complaint(
     *,
     reference_id: str | None = None,
     call_sid: str | None = None,
+    caller_number: str | None = None,
     urgency: float | None = None,
     language: str | None = None,
     dialect: str | None = None,
@@ -878,6 +880,7 @@ def register_complaint(
         "call_log_id": call_log_id,
         "reference_id": reference_id,
         "call_sid": call_sid,
+        "caller_number": caller_number,
         "category": category,
         "description": description,
         "location": location,
@@ -902,18 +905,36 @@ def register_complaint(
 
 
 def get_complaints(limit: int = 50, call_sid: str | None = None) -> list[dict]:
-    """Fetch recent complaints for dashboard."""
+    """Fetch recent complaints for dashboard, enriched with caller_number from call_logs."""
     sb = get_client()
     try:
-        query = sb.table("complaints").select("*")
+        query = sb.table("complaints").select("*, call_logs(caller_number)")
         if call_sid:
             query = query.eq("call_sid", call_sid)
         resp = query.order("created_at", desc=True).limit(limit).execute()
         _clear_error()
-        return resp.data or []
+        rows = resp.data or []
+        # Flatten the joined call_logs.caller_number into the complaint row
+        result = []
+        for row in rows:
+            r = dict(row)
+            joined_log = r.pop("call_logs", None) or {}
+            if not r.get("caller_number") and joined_log.get("caller_number"):
+                r["caller_number"] = joined_log["caller_number"]
+            result.append(r)
+        return result
     except Exception as exc:
         _record_error("get_complaints", exc)
-        return []
+        # Fallback: plain fetch without join
+        try:
+            query2 = sb.table("complaints").select("*")
+            if call_sid:
+                query2 = query2.eq("call_sid", call_sid)
+            resp2 = query2.order("created_at", desc=True).limit(limit).execute()
+            _clear_error()
+            return resp2.data or []
+        except Exception:
+            return []
 
 
 def get_complaint_by_reference(reference_id: str) -> Optional[dict]:
