@@ -1,4 +1,5 @@
 "use client";
+import "./dashboard.css";
 
 import {
   Activity,
@@ -715,13 +716,36 @@ export default function DashboardPage() {
 
   return (
     <main className="shell">
+      {/* Tricolour bar */}
+      <div style={{ display:"flex", height:"5px", width:"calc(100% + 48px)", marginLeft:"-24px" }}>
+        <span style={{ flex:1, background:"#FF9933" }} />
+        <span style={{ flex:1, background:"#FFFFFF", borderTop:"1px solid #eee", borderBottom:"1px solid #eee" }} />
+        <span style={{ flex:1, background:"#138808" }} />
+      </div>
+
       <header className="topbar">
         <div className="brand-lockup">
           <img className="brand-logo" src="/sahayak_logo.svg" alt="Sahayak 1092" />
           <div className="brand-meta">
-            <div className="eyebrow">Sahayak 1092</div>
+            <div className="eyebrow">भारत सरकार · Sahayak 1092</div>
             <div className="brand-name">Officer Command Center</div>
           </div>
+          {/* India Flag SVG */}
+          <svg width="40" height="27" viewBox="0 0 900 600" xmlns="http://www.w3.org/2000/svg"
+            aria-label="Flag of India"
+            style={{ borderRadius:"2px", boxShadow:"0 2px 6px rgba(0,0,0,0.4)", flexShrink:0, marginLeft:"6px" }}>
+            <rect width="900" height="200" fill="#FF9933" />
+            <rect y="200" width="900" height="200" fill="#FFFFFF" />
+            <rect y="400" width="900" height="200" fill="#138808" />
+            <g transform="translate(450,300)">
+              <circle r="90" fill="none" stroke="#000080" strokeWidth="10" />
+              <circle r="10" fill="#000080" />
+              {Array.from({ length: 24 }).map((_, i) => {
+                const rad = (i * 360 / 24) * Math.PI / 180;
+                return <line key={i} x1="0" y1="0" x2={Math.round(80*Math.sin(rad))} y2={Math.round(-80*Math.cos(rad))} stroke="#000080" strokeWidth="5" strokeLinecap="round" />;
+              })}
+            </g>
+          </svg>
         </div>
         <div className="top-actions">
           <span className={`status-pill ${backendHealthy ? "" : "offline"}`}>
@@ -744,41 +768,44 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      <section className="hero">
-        <div>
-          <div className="section-kicker">AI-first emergency response</div>
-          <h1 className="hero-title">Every call resolved from one command surface.</h1>
-          <p className="hero-copy">
-            Monitor live calls, queue pressure, officer availability, Vachan status, Smart
-            Similarity matches, complaint creation, warm handovers, and audit trails without
-            leaving the dashboard.
-          </p>
+      {/* Compact command strip — replaces the large hero */}
+      <div className="cmd-strip">
+        <div className="cmd-strip-left">
+          <span className="cmd-strip-kicker">
+            <span className="cmd-live-dot" />
+            AI-FIRST COMMAND CENTER
+          </span>
+          <span className="cmd-strip-title">Sahayak 1092 — Officer Dashboard</span>
         </div>
-        <aside className="hero-panel">
-          <div className="signal-grid">
-            <div className="signal-tile">
-              <div className="stat-label">Live calls</div>
-              <div className="signal-value">{data.activeCalls.length}</div>
-              <div className="signal-caption">streaming into Sahayak</div>
-            </div>
-            <div className="signal-tile">
-              <div className="stat-label">Queue alerts</div>
-              <div className="signal-value">{highHelpAlerts.length}</div>
-              <div className="signal-caption">High-Help watchlist</div>
-            </div>
-            <div className="signal-tile">
-              <div className="stat-label">Vector cases</div>
-              <div className="signal-value">{data.cases.length}</div>
-              <div className="signal-caption">knowledge assets</div>
-            </div>
-            <div className="signal-tile">
-              <div className="stat-label">Audit loaded</div>
-              <div className="signal-value">{data.events.length}</div>
-              <div className="signal-caption">latest decisions</div>
-            </div>
+        <div className="cmd-strip-signals">
+          <div className="cmd-signal">
+            <span className="cmd-signal-val">{data.activeCalls.length}</span>
+            <span className="cmd-signal-lbl">Live Calls</span>
           </div>
-        </aside>
-      </section>
+          <div className="cmd-signal-sep" />
+          <div className="cmd-signal">
+            <span className="cmd-signal-val" style={{ color: highHelpAlerts.length > 0 ? "#fca5a5" : undefined }}>
+              {highHelpAlerts.length}
+            </span>
+            <span className="cmd-signal-lbl">Queue Alerts</span>
+          </div>
+          <div className="cmd-signal-sep" />
+          <div className="cmd-signal">
+            <span className="cmd-signal-val" style={{ color: "#4ade80" }}>{availableAgents.length}</span>
+            <span className="cmd-signal-lbl">Officers Online</span>
+          </div>
+          <div className="cmd-signal-sep" />
+          <div className="cmd-signal">
+            <span className="cmd-signal-val">{data.cases.length}</span>
+            <span className="cmd-signal-lbl">Vector Cases</span>
+          </div>
+          <div className="cmd-signal-sep" />
+          <div className="cmd-signal">
+            <span className="cmd-signal-val">{data.events.length}</span>
+            <span className="cmd-signal-lbl">Audit Events</span>
+          </div>
+        </div>
+      </div>
 
       <nav className="nav" aria-label="Dashboard navigation">
         {tabs.map((item) => {
